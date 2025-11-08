@@ -1,0 +1,15 @@
+[project]
+name = "kimi-k2-novelist"
+version = "0.1.0"
+description = "Generate novel-length Markdown books with Moonshot AI Kimi K2 reasoning models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.40.0",
+  "python-dotenv>=1.0.1",
+  "rich>=13.7.1",
+  "tenacity>=9.0.0",
+]
+
+[tool.uv]
+dev-dependencies = []
