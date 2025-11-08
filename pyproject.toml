@@ -11,5 +11,5 @@ dependencies = [
   "tenacity>=9.0.0",
 ]
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = []
