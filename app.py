@@ -166,14 +166,43 @@ def publish_novel(title: str):
 
     # Git commit
     try:
-        subprocess.run(["git", "add", str(published_md), str(published_state)], check=True)
+        # Add files to staging
+        subprocess.run(
+            ["git", "add", str(published_md), str(published_state)],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        # Check if there are changes to commit
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            capture_output=True
+        )
+
+        if result.returncode == 0:
+            # No changes to commit (file already published with same content)
+            logger.info(f"Novel '{title}' already published with same content, no commit needed")
+            return True
+
+        # Commit the changes
         subprocess.run(
             ["git", "commit", "-m", f"Publish novel: {title}"],
-            check=True
+            check=True,
+            capture_output=True,
+            text=True
         )
+        logger.info(f"Successfully published and committed novel: {title}")
         return True
+
     except subprocess.CalledProcessError as e:
-        st.error(f"Git commit failed: {e}")
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        logger.error(f"Git operation failed for novel '{title}': {error_msg}", exc_info=True)
+        st.error(f"Failed to commit to git. Please ensure git is configured properly.")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error publishing novel '{title}': {e}", exc_info=True)
+        st.error(f"Unexpected error during publish: {str(e)}")
         return False
 
 def delete_novel(title: str, preview: bool = True):
