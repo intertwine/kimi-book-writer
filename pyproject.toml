@@ -9,6 +9,7 @@ dependencies = [
   "python-dotenv>=1.0.1",
   "rich>=13.7.1",
   "tenacity>=9.0.0",
+  "streamlit>=1.28.0",
 ]
 
 [dependency-groups]
