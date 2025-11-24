@@ -33,7 +33,11 @@ The easiest way to get started is using GitHub Codespaces:
    ```
 4. Start the web UI:
    ```bash
+   # Option 1: Direct launch
    streamlit run app.py
+
+   # Option 2: Using helper script (auto-installs dependencies)
+   bash run-ui.sh
    ```
 5. Click the notification to open the UI (or go to the Ports tab and open port 8501)
 

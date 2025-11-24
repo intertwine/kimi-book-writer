@@ -10,15 +10,15 @@ import json
 import shutil
 import subprocess
 import re
+import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # Import from existing modules
 from kimi_writer import (
     get_client,
     chat_complete_stream,
-    stream_to_text,
     build_book_markdown,
     SYSTEM_PRIMER,
     OUTLINE_PROMPT,
@@ -26,6 +26,10 @@ from kimi_writer import (
     env
 )
 from utils import extract_outline_items
+
+# Configure logging for server-side error tracking
+logging.basicConfig(level=logging.ERROR)
+logger = logging.getLogger(__name__)
 
 # Constants
 PREVIEW_DIR = Path("preview")
@@ -95,6 +99,7 @@ def list_novels(preview: bool = True) -> List[Dict]:
     """List all novels in preview or published directory."""
     base_dir = PREVIEW_DIR if preview else PUBLISHED_DIR
     novels = []
+    errors = []
 
     for state_file in base_dir.glob("*_state.json"):
         try:
@@ -114,9 +119,12 @@ def list_novels(preview: bool = True) -> List[Dict]:
                 "exists": md_file.exists()
             })
         except Exception as e:
-            st.error(f"Error loading {state_file}: {e}")
+            # Log error server-side and collect for contextual display
+            logger.error(f"Error loading {state_file}: {e}", exc_info=True)
+            errors.append(f"Failed to load {state_file.name}")
 
-    return sorted(novels, key=lambda x: x["title"])
+    # Return novels and errors separately for contextual display
+    return sorted(novels, key=lambda x: x["title"]), errors
 
 def init_novel_state(title: str, concept: str) -> Dict:
     """Initialize a new novel state."""
@@ -185,7 +193,13 @@ def render_generate_tab():
     st.markdown('<div class="sub-header">Create a new novel or continue an existing one</div>', unsafe_allow_html=True)
 
     # List existing preview novels
-    preview_novels = list_novels(preview=True)
+    preview_novels, load_errors = list_novels(preview=True)
+
+    # Display any loading errors
+    if load_errors:
+        st.warning("⚠️ Some novels failed to load:")
+        for error in load_errors:
+            st.caption(f"- {error}")
 
     col1, col2 = st.columns([2, 1])
 
@@ -312,14 +326,18 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
             chapter_title = state["outline_items"][idx]
             status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
 
-            # Build context
-            context_snippets = "\n\n".join(
-                ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
-            )
+            # Build context (only include if there are previous chapters)
+            user_content = f"Novel concept:\n{concept}\n\n"
+            if state["chapters"]:
+                context_snippets = "\n\n".join(
+                    ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
+                )
+                user_content += f"Existing recent context (last chapters excerpts):\n{context_snippets}\n\n"
+            user_content += CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)
 
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},
-                {"role": "user", "content": f"Novel concept:\n{concept}\n\nExisting recent context (last chapters excerpts):\n{context_snippets}\n\n{CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)}"}
+                {"role": "user", "content": user_content}
             ]
 
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
@@ -351,9 +369,11 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
         st.balloons()
 
     except Exception as e:
-        st.error(f"Error during generation: {e}")
-        import traceback
-        st.code(traceback.format_exc())
+        # Log full traceback server-side
+        logger.error(f"Error during novel generation: {e}", exc_info=True)
+        # Display user-friendly error message
+        st.error(f"❌ Error during generation: {str(e)}")
+        st.info("The error has been logged. Please check your API key and try again.")
 
 def continue_novel(novel: Dict):
     """Continue generating an incomplete novel."""
@@ -383,13 +403,18 @@ def continue_novel(novel: Dict):
             chapter_title = state["outline_items"][idx]
             status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
 
-            context_snippets = "\n\n".join(
-                ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
-            )
+            # Build context (only include if there are previous chapters)
+            user_content = f"Novel concept:\n{state['concept']}\n\n"
+            if state["chapters"]:
+                context_snippets = "\n\n".join(
+                    ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
+                )
+                user_content += f"Existing recent context (last chapters excerpts):\n{context_snippets}\n\n"
+            user_content += CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)
 
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},
-                {"role": "user", "content": f"Novel concept:\n{state['concept']}\n\nExisting recent context (last chapters excerpts):\n{context_snippets}\n\n{CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)}"}
+                {"role": "user", "content": user_content}
             ]
 
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
@@ -418,9 +443,11 @@ def continue_novel(novel: Dict):
         st.balloons()
 
     except Exception as e:
-        st.error(f"Error continuing novel: {e}")
-        import traceback
-        st.code(traceback.format_exc())
+        # Log full traceback server-side
+        logger.error(f"Error continuing novel: {e}", exc_info=True)
+        # Display user-friendly error message
+        st.error(f"❌ Error continuing novel: {str(e)}")
+        st.info("The error has been logged. Please check your API key and try again.")
 
 def render_library_tab():
     """Render the library management tab."""
@@ -438,7 +465,13 @@ def render_library_tab():
 
 def render_novel_list(preview: bool):
     """Render a list of novels."""
-    novels = list_novels(preview=preview)
+    novels, load_errors = list_novels(preview=preview)
+
+    # Display any loading errors
+    if load_errors:
+        st.warning("⚠️ Some novels failed to load:")
+        for error in load_errors:
+            st.caption(f"- {error}")
 
     if not novels:
         st.info(f"No novels in {'preview' if preview else 'published'} yet.")
@@ -485,6 +518,15 @@ def render_novel_list(preview: bool):
                         st.caption("⏳ Incomplete")
 
                 if st.button("🗑️ Delete", key=f"delete_{novel['slug']}_{preview}"):
+                    # Clear reading state if deleting the currently open novel
+                    if 'reading_novel' in st.session_state:
+                        if st.session_state.reading_novel['title'] == novel['title']:
+                            del st.session_state.reading_novel
+                            if 'reading_preview' in st.session_state:
+                                del st.session_state.reading_preview
+                            if 'selected_chapter' in st.session_state:
+                                del st.session_state.selected_chapter
+
                     delete_novel(novel['title'], preview=preview)
                     st.success("Deleted!")
                     st.rerun()
@@ -506,8 +548,13 @@ def render_reader():
         st.markdown(f'<div class="main-header">📖 {novel["title"]}</div>', unsafe_allow_html=True)
     with col2:
         if st.button("← Back to Library"):
-            del st.session_state.reading_novel
-            del st.session_state.reading_preview
+            # Clear all reading-related session state
+            if 'reading_novel' in st.session_state:
+                del st.session_state.reading_novel
+            if 'reading_preview' in st.session_state:
+                del st.session_state.reading_preview
+            if 'selected_chapter' in st.session_state:
+                del st.session_state.selected_chapter
             st.rerun()
 
     # Load full content
@@ -529,11 +576,23 @@ def render_reader():
     # Chapter navigation
     st.markdown('<div class="chapter-nav">', unsafe_allow_html=True)
     chapter_titles = [f"Ch {i+1}: {ch['title']}" for i, ch in enumerate(chapters)]
+
+    # Initialize or get selected chapter from session state
+    if 'selected_chapter' not in st.session_state:
+        st.session_state.selected_chapter = 0
+
     selected_chapter = st.selectbox(
         "Jump to chapter:",
         range(len(chapters)),
-        format_func=lambda x: chapter_titles[x]
+        index=st.session_state.selected_chapter,
+        format_func=lambda x: chapter_titles[x],
+        key="chapter_selector"
     )
+
+    # Update session state when selectbox changes
+    if selected_chapter != st.session_state.selected_chapter:
+        st.session_state.selected_chapter = selected_chapter
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Display selected chapter
@@ -570,10 +629,10 @@ def main():
 
         st.markdown("---")
         st.markdown("### Stats")
-        preview_count = len(list_novels(preview=True))
-        published_count = len(list_novels(preview=False))
-        st.metric("Preview Novels", preview_count)
-        st.metric("Published Novels", published_count)
+        preview_novels, _ = list_novels(preview=True)
+        published_novels, _ = list_novels(preview=False)
+        st.metric("Preview Novels", len(preview_novels))
+        st.metric("Published Novels", len(published_novels))
 
         st.markdown("---")
         st.markdown("### About")
