@@ -13,19 +13,28 @@ if [ ! -f .env ]; then
     echo ""
 fi
 
-# Check if streamlit is installed
-if ! python -c "import streamlit" 2>/dev/null; then
-    echo "📦 Installing dependencies..."
-    pip install -e . || {
-        echo "❌ Installation failed. Please install dependencies manually:"
-        echo "   pip install -e ."
-        exit 1
-    }
+# Use uv to sync dependencies and run in isolated environment
+if command -v uv &> /dev/null; then
+    echo "📦 Syncing dependencies with uv..."
+    uv sync --quiet
     echo ""
+    echo "✨ Opening web UI..."
+    echo "   (Press Ctrl+C to stop)"
+    echo ""
+    uv run streamlit run app.py --server.headless true
+else
+    # Fallback for environments without uv
+    if ! python -c "import streamlit" 2>/dev/null; then
+        echo "📦 Installing dependencies..."
+        pip install -e . || {
+            echo "❌ Installation failed. Please install dependencies manually:"
+            echo "   pip install -e ."
+            exit 1
+        }
+        echo ""
+    fi
+    echo "✨ Opening web UI..."
+    echo "   (Press Ctrl+C to stop)"
+    echo ""
+    streamlit run app.py --server.headless true
 fi
-
-# Start Streamlit
-echo "✨ Opening web UI..."
-echo "   (Press Ctrl+C to stop)"
-echo ""
-streamlit run app.py --server.headless true

@@ -6,6 +6,7 @@ Generate novel-length Markdown books using **Moonshot AI's Kimi K2 reasoning mod
 🚀 **One-click launch** in GitHub Codespaces!
 
 **Two ways to use:**
+
 - 🖥️ **Web UI** - Streamlit-based interface for easy novel generation and management
 - 💻 **CLI** - Command-line interface for automated workflows
 
@@ -24,14 +25,18 @@ Generate novel-length Markdown books using **Moonshot AI's Kimi K2 reasoning mod
 
 The easiest way to get started is using GitHub Codespaces:
 
-1. Click the **Code** button → **Codespaces** → **Create codespace on `main`**
-2. Wait for the environment to set up (automatic)
-3. Create a `.env` file with your Moonshot API key:
+1. **Fork this repository first** (click the **Fork** button at the top right)
+2. In your fork, click the **Code** button → **Codespaces** → **Create codespace on `main`**
+3. Wait for the environment to set up (automatic)
+4. Create a `.env` file with your Moonshot API key:
+
    ```bash
    cp .env.example .env
    # Edit .env and add: MOONSHOT_API_KEY=sk-...
    ```
-4. Start the web UI:
+
+5. Start the web UI:
+
    ```bash
    # Option 1: Direct launch
    streamlit run app.py
@@ -39,9 +44,13 @@ The easiest way to get started is using GitHub Codespaces:
    # Option 2: Using helper script (auto-installs dependencies)
    bash run-ui.sh
    ```
-5. Click the notification to open the UI (or go to the Ports tab and open port 8501)
+
+6. Click the notification to open the UI (or go to the Ports tab and open port 8501)
+
+> **Why fork first?** Forking gives you your own copy of the repository where you can save your generated novels. The "Publish" feature commits novels to your fork, preserving your work.
 
 **Web UI Features:**
+
 - 📝 **Generate** - Create new novels with a user-friendly form
 - 📚 **Library** - Manage preview and published novels
 - 📖 **Reader** - Read novels with chapter navigation
@@ -49,6 +58,7 @@ The easiest way to get started is using GitHub Codespaces:
 - ⬇️ **Download** - Export novels as Markdown files
 
 **Directory Structure:**
+
 - `preview/` - Novels being worked on (gitignored)
 - `published/` - Finalized novels (committed to repo)
 
@@ -123,12 +133,14 @@ Artifacts:
 ### Web UI Workflow
 
 1. **Generate Tab**
+
    - Enter novel concept, title, and settings
    - Watch real-time generation progress
    - Novels saved to `preview/` directory (gitignored)
    - Resume incomplete novels anytime
 
 2. **Library Tab**
+
    - Browse preview and published novels
    - Read novels with chapter navigation
    - Download as Markdown files

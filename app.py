@@ -14,9 +14,13 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List
+from dotenv import load_dotenv
 
-# Import from existing modules
-from kimi_writer import (
+# Load environment variables from .env file (must happen before importing kimi_writer)
+load_dotenv()
+
+# Import from existing modules (after load_dotenv so env vars are available)
+from kimi_writer import (  # noqa: E402
     get_client,
     chat_complete_stream,
     build_book_markdown,
@@ -25,7 +29,7 @@ from kimi_writer import (
     CHAPTER_PROMPT,
     env
 )
-from utils import extract_outline_items
+from utils import extract_outline_items  # noqa: E402
 
 # Configure logging for server-side error tracking
 logging.basicConfig(level=logging.ERROR)
@@ -198,7 +202,7 @@ def publish_novel(title: str):
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode() if e.stderr else str(e)
         logger.error(f"Git operation failed for novel '{title}': {error_msg}", exc_info=True)
-        st.error(f"Failed to commit to git. Please ensure git is configured properly.")
+        st.error("Failed to commit to git. Please ensure git is configured properly.")
         return False
     except Exception as e:
         logger.error(f"Unexpected error publishing novel '{title}': {e}", exc_info=True)
@@ -233,15 +237,18 @@ def render_generate_tab():
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Mode selection
-        mode = st.radio(
-            "Mode",
-            ["New Novel", "Continue Existing"],
-            horizontal=True
-        )
+        # Check if generation is in progress
+        is_generating = st.session_state.get("generating", False)
 
-        if mode == "New Novel":
-            with st.form("new_novel_form"):
+        if not is_generating:
+            # Mode selection
+            mode = st.radio(
+                "Mode",
+                ["New Novel", "Continue Existing"],
+                horizontal=True
+            )
+
+            if mode == "New Novel":
                 title = st.text_input("Novel Title *", placeholder="Enter a compelling title...")
                 concept = st.text_area(
                     "Novel Concept *",
@@ -255,9 +262,7 @@ def render_generate_tab():
                 with col_b:
                     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.6, step=0.1)
 
-                submitted = st.form_submit_button("Start Generation", use_container_width=True)
-
-                if submitted:
+                if st.button("Start Generation", use_container_width=True):
                     if not title or not concept:
                         st.error("Please provide both title and concept.")
                     else:
@@ -266,28 +271,58 @@ def render_generate_tab():
                         if existing.exists():
                             st.error(f"A novel with title '{title}' already exists in preview. Please choose a different title or continue the existing one.")
                         else:
-                            generate_novel(title, concept, max_chapters, temperature)
+                            st.session_state.generating = True
+                            st.session_state.gen_params = {
+                                "mode": "new",
+                                "title": title,
+                                "concept": concept,
+                                "max_chapters": max_chapters,
+                                "temperature": temperature
+                            }
+                            st.rerun()
 
-        else:  # Continue Existing
-            if not preview_novels:
-                st.info("No novels in preview. Create a new novel to get started!")
-            else:
-                novel_options = {n["title"]: n for n in preview_novels}
-                selected_title = st.selectbox(
-                    "Select Novel to Continue",
-                    options=list(novel_options.keys())
-                )
+            else:  # Continue Existing
+                if not preview_novels:
+                    st.info("No novels in preview. Create a new novel to get started!")
+                else:
+                    novel_options = {n["title"]: n for n in preview_novels}
+                    selected_title = st.selectbox(
+                        "Select Novel to Continue",
+                        options=list(novel_options.keys())
+                    )
 
-                if selected_title:
-                    novel = novel_options[selected_title]
-                    st.info(f"**Concept:** {novel['concept']}")
-                    st.info(f"**Progress:** {novel['chapters_written']}/{novel['total_chapters']} chapters")
+                    if selected_title:
+                        novel = novel_options[selected_title]
+                        st.info(f"**Concept:** {novel['concept']}")
+                        st.info(f"**Progress:** {novel['chapters_written']}/{novel['total_chapters']} chapters")
 
-                    if novel['chapters_written'] >= novel['total_chapters']:
-                        st.success("✅ This novel is complete!")
+                        if novel['chapters_written'] >= novel['total_chapters']:
+                            st.success("✅ This novel is complete!")
 
-                    if st.button("Continue Generation", use_container_width=True):
-                        continue_novel(novel)
+                        if st.button("Continue Generation", use_container_width=True):
+                            st.session_state.generating = True
+                            st.session_state.gen_params = {
+                                "mode": "continue",
+                                "novel": novel
+                            }
+                            st.rerun()
+
+        else:
+            # Generation in progress - show pause button
+            st.caption("Progress is saved after each chapter. You can pause and continue later from the Library.")
+            if st.button("⏸️ Pause Generation", use_container_width=True, type="primary"):
+                st.session_state.stop_generation = True
+
+            # Run the appropriate generation function
+            params = st.session_state.get("gen_params", {})
+            if params.get("mode") == "new":
+                generate_novel(params["title"], params["concept"], params["max_chapters"], params["temperature"])
+            elif params.get("mode") == "continue":
+                continue_novel(params["novel"])
+
+            # Generation complete - reset state
+            st.session_state.generating = False
+            st.session_state.gen_params = {}
 
     with col2:
         st.markdown("### 💡 Tips")
@@ -352,6 +387,13 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
         total_chapters = len(state["outline_items"])
 
         for idx in range(total_chapters):
+            # Check if stop was requested
+            if st.session_state.get("stop_generation", False):
+                st.session_state.stop_generation = False
+                st.session_state.generating = False
+                st.warning(f"⏸️ Generation paused at chapter {idx}/{total_chapters}. You can continue from the Library tab.")
+                st.rerun()
+
             chapter_title = state["outline_items"][idx]
             status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
 
@@ -429,6 +471,13 @@ def continue_novel(novel: Dict):
         total_chapters = len(state["outline_items"])
 
         for idx in range(state["current_idx"], total_chapters):
+            # Check if stop was requested
+            if st.session_state.get("stop_generation", False):
+                st.session_state.stop_generation = False
+                st.session_state.generating = False
+                st.warning(f"⏸️ Generation paused at chapter {idx}/{total_chapters}. You can continue from the Library tab.")
+                st.rerun()
+
             chapter_title = state["outline_items"][idx]
             status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
 
@@ -586,13 +635,11 @@ def render_reader():
                 del st.session_state.selected_chapter
             st.rerun()
 
-    # Load full content
+    # Verify novel file exists
     md_path = get_novel_md_path(novel['title'], preview)
     if not md_path.exists():
         st.error("Novel file not found!")
         return
-
-    content = md_path.read_text()
 
     # Extract chapters
     state = novel['state']
@@ -606,25 +653,29 @@ def render_reader():
     st.markdown('<div class="chapter-nav">', unsafe_allow_html=True)
     chapter_titles = [f"Ch {i+1}: {ch['title']}" for i, ch in enumerate(chapters)]
 
-    # Initialize or get selected chapter from session state
+    # Initialize selected chapter in session state
     if 'selected_chapter' not in st.session_state:
         st.session_state.selected_chapter = 0
 
-    selected_chapter = st.selectbox(
+    # Callback to update session state when selectbox changes
+    def on_chapter_select():
+        st.session_state.selected_chapter = st.session_state.chapter_selector
+
+    # Sync the selectbox key with session state before rendering
+    st.session_state.chapter_selector = st.session_state.selected_chapter
+
+    st.selectbox(
         "Jump to chapter:",
         range(len(chapters)),
-        index=st.session_state.selected_chapter,
         format_func=lambda x: chapter_titles[x],
-        key="chapter_selector"
+        key="chapter_selector",
+        on_change=on_chapter_select
     )
-
-    # Update session state when selectbox changes
-    if selected_chapter != st.session_state.selected_chapter:
-        st.session_state.selected_chapter = selected_chapter
 
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Display selected chapter
+    selected_chapter = st.session_state.selected_chapter
     chapter = chapters[selected_chapter]
     st.markdown(chapter['content'])
 
@@ -666,7 +717,7 @@ def main():
         st.markdown("---")
         st.markdown("### About")
         st.markdown("Powered by Moonshot AI's Kimi K2 models")
-        st.markdown("[Documentation](https://github.com/yourusername/kimi-book-writer)")
+        st.markdown("[Documentation](https://github.com/intertwine/kimi-book-writer)")
 
     # Main content
     if 'reading_novel' in st.session_state:
