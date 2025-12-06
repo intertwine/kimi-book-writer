@@ -158,3 +158,6 @@ novel_state.json
 book.md
 novel.md
 preview/
+
+.playwright-mcp
+.playwright-test

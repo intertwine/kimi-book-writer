@@ -87,6 +87,14 @@ def get_novel_slug(title: str) -> str:
     slug = re.sub(r'[-\s]+', '-', slug)
     return slug.strip('-')
 
+def strip_markdown_formatting(text: str) -> str:
+    """Strip markdown bold (**text**) and italic (*text*) formatting from a string."""
+    # First strip bold (double asterisks)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    # Then strip italic (single asterisks)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    return text
+
 def get_novel_state_path(title: str, preview: bool = True) -> Path:
     """Get the path to a novel's state file."""
     slug = get_novel_slug(title)
@@ -260,7 +268,14 @@ def render_generate_tab():
                 with col_a:
                     max_chapters = st.number_input("Max Chapters", min_value=5, max_value=100, value=30)
                 with col_b:
-                    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.6, step=0.1)
+                    temperature = st.slider(
+                        "Temperature",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.6,
+                        step=0.1,
+                        help="Lower = more focused and consistent. Higher = more creative and varied."
+                    )
 
                 if st.button("Start Generation", use_container_width=True):
                     if not title or not concept:
@@ -325,18 +340,18 @@ def render_generate_tab():
             st.session_state.gen_params = {}
 
     with col2:
-        st.markdown("### 💡 Tips")
-        st.markdown("""
-        **Good Concepts Include:**
-        - Genre and tone
-        - Main characters
-        - Setting/world
-        - Central conflict
-        - Themes to explore
+        with st.expander("💡 Tips", expanded=True):
+            st.markdown("""
+**Good Concepts Include:**
+- Genre and tone
+- Main characters
+- Setting/world
+- Central conflict
+- Themes to explore
 
-        **Example:**
-        *"A cyberpunk thriller set in 2150 Tokyo. A rogue AI detective must solve a series of murders in the virtual realm while questioning their own consciousness. Themes: identity, reality vs simulation, corporate dystopia."*
-        """)
+**Example:**
+*"A cyberpunk thriller set in 2150 Tokyo. A rogue AI detective must solve a series of murders in the virtual realm while questioning their own consciousness. Themes: identity, reality vs simulation, corporate dystopia."*
+            """)
 
 def generate_novel(title: str, concept: str, max_chapters: int, temperature: float):
     """Generate a new novel from scratch."""
@@ -395,7 +410,7 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
                 st.rerun()
 
             chapter_title = state["outline_items"][idx]
-            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
+            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {strip_markdown_formatting(chapter_title)}")
 
             # Build context (only include if there are previous chapters)
             user_content = f"Novel concept:\n{concept}\n\n"
@@ -479,7 +494,7 @@ def continue_novel(novel: Dict):
                 st.rerun()
 
             chapter_title = state["outline_items"][idx]
-            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {chapter_title}")
+            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {strip_markdown_formatting(chapter_title)}")
 
             # Build context (only include if there are previous chapters)
             user_content = f"Novel concept:\n{state['concept']}\n\n"
@@ -569,12 +584,14 @@ def render_novel_list(preview: bool):
                 st.caption(f"{novel['chapters_written']}/{novel['total_chapters']} chapters")
 
             with col2:
-                if st.button("📖 Read", key=f"read_{novel['slug']}_{preview}"):
-                    st.session_state.reading_novel = novel
-                    st.session_state.reading_preview = preview
-                    st.rerun()
+                # Only show Read button if novel has chapters
+                if novel['chapters_written'] > 0:
+                    if st.button("📖 Read", key=f"read_{novel['slug']}_{preview}"):
+                        st.session_state.reading_novel = novel
+                        st.session_state.reading_preview = preview
+                        st.rerun()
 
-                if novel['exists']:
+                if novel['exists'] and novel['chapters_written'] > 0:
                     with open(novel['md_path'], 'r') as f:
                         st.download_button(
                             "⬇️ Download",
@@ -583,6 +600,8 @@ def render_novel_list(preview: bool):
                             mime="text/markdown",
                             key=f"download_{novel['slug']}_{preview}"
                         )
+                elif novel['chapters_written'] == 0:
+                    st.button("⬇️ Download", disabled=True, key=f"download_disabled_{novel['slug']}_{preview}", help="No content yet")
 
             with col3:
                 if preview:
@@ -593,21 +612,31 @@ def render_novel_list(preview: bool):
                                     st.success("Published successfully!")
                                     st.rerun()
                     else:
-                        st.caption("⏳ Incomplete")
+                        # Show Continue button for incomplete novels (progress bar shows status)
+                        if st.button("▶️ Continue", key=f"continue_{novel['slug']}"):
+                            st.session_state.generating = True
+                            st.session_state.gen_params = {
+                                "mode": "continue",
+                                "novel": novel
+                            }
+                            st.rerun()
 
-                if st.button("🗑️ Delete", key=f"delete_{novel['slug']}_{preview}"):
-                    # Clear reading state if deleting the currently open novel
-                    if 'reading_novel' in st.session_state:
-                        if st.session_state.reading_novel['title'] == novel['title']:
-                            del st.session_state.reading_novel
-                            if 'reading_preview' in st.session_state:
-                                del st.session_state.reading_preview
-                            if 'selected_chapter' in st.session_state:
-                                del st.session_state.selected_chapter
+                with st.popover("🗑️ Delete", use_container_width=True):
+                    st.warning(f"Delete **{novel['title']}**?")
+                    st.caption("This action cannot be undone.")
+                    if st.button("Yes, delete", key=f"confirm_delete_{novel['slug']}_{preview}", type="primary"):
+                        # Clear reading state if deleting the currently open novel
+                        if 'reading_novel' in st.session_state:
+                            if st.session_state.reading_novel['title'] == novel['title']:
+                                del st.session_state.reading_novel
+                                if 'reading_preview' in st.session_state:
+                                    del st.session_state.reading_preview
+                                if 'selected_chapter' in st.session_state:
+                                    del st.session_state.selected_chapter
 
-                    delete_novel(novel['title'], preview=preview)
-                    st.success("Deleted!")
-                    st.rerun()
+                        delete_novel(novel['title'], preview=preview)
+                        st.success("Deleted!")
+                        st.rerun()
 
             st.markdown("---")
 
@@ -633,6 +662,8 @@ def render_reader():
                 del st.session_state.reading_preview
             if 'selected_chapter' in st.session_state:
                 del st.session_state.selected_chapter
+            # Set flag to show Library tab when returning
+            st.session_state.show_library_tab = True
             st.rerun()
 
     # Verify novel file exists
@@ -651,7 +682,7 @@ def render_reader():
 
     # Chapter navigation
     st.markdown('<div class="chapter-nav">', unsafe_allow_html=True)
-    chapter_titles = [f"Ch {i+1}: {ch['title']}" for i, ch in enumerate(chapters)]
+    chapter_titles = [f"Ch {i+1}: {strip_markdown_formatting(ch['title'])}" for i, ch in enumerate(chapters)]
 
     # Initialize selected chapter in session state
     if 'selected_chapter' not in st.session_state:
@@ -711,7 +742,14 @@ def main():
         st.markdown("### Stats")
         preview_novels, _ = list_novels(preview=True)
         published_novels, _ = list_novels(preview=False)
+
+        # Calculate complete vs incomplete for preview
+        complete_previews = sum(1 for n in preview_novels if n['chapters_written'] >= n['total_chapters'] and n['total_chapters'] > 0)
+        incomplete_previews = len(preview_novels) - complete_previews
+
         st.metric("Preview Novels", len(preview_novels))
+        if preview_novels:
+            st.caption(f"  {complete_previews} complete, {incomplete_previews} in progress")
         st.metric("Published Novels", len(published_novels))
 
         st.markdown("---")
@@ -723,13 +761,23 @@ def main():
     if 'reading_novel' in st.session_state:
         render_reader()
     else:
-        tab1, tab2 = st.tabs(["📝 Generate", "📚 Library"])
+        # Check if we should show Library tab (e.g., returning from reader)
+        default_tab = 1 if st.session_state.pop('show_library_tab', False) else 0
 
-        with tab1:
-            render_generate_tab()
-
-        with tab2:
-            render_library_tab()
+        # Create tabs - Streamlit doesn't support default_index, so we use a workaround
+        if default_tab == 1:
+            # Show Library first by reordering, then swap back visually
+            tab2, tab1 = st.tabs(["📚 Library", "📝 Generate"])
+            with tab1:
+                render_generate_tab()
+            with tab2:
+                render_library_tab()
+        else:
+            tab1, tab2 = st.tabs(["📝 Generate", "📚 Library"])
+            with tab1:
+                render_generate_tab()
+            with tab2:
+                render_library_tab()
 
 if __name__ == "__main__":
     main()
