@@ -13,4 +13,6 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = []
+dev = [
+  "pytest>=8.0.0",
+]
