@@ -208,7 +208,7 @@ def publish_novel(title: str):
         return True
 
     except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.decode() if e.stderr else str(e)
+        error_msg = e.stderr if e.stderr else str(e)
         logger.error(f"Git operation failed for novel '{title}': {error_msg}", exc_info=True)
         st.error("Failed to commit to git. Please ensure git is configured properly.")
         return False
