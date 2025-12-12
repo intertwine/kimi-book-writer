@@ -112,7 +112,9 @@ python kimi_writer.py --prompt "A near-future techno-thriller about..." --title 
 Useful flags:
 
 - `--resume` Continue from `novel_state.json`
-- `--chapters N` Limit number of chapters (smoke test)
+- `--chapters N` Limit number of chapters to write:
+  - **Without `--resume`**: Write up to N chapters total (e.g., `--chapters 3` writes chapters 1-3)
+  - **With `--resume`**: Write N *more* chapters from current progress (e.g., if 5 chapters exist, `--resume --chapters 3` writes chapters 6-8)
 
 Artifacts:
 
