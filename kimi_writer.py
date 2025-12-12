@@ -171,7 +171,12 @@ def main():
     console.rule("[bold]Writing chapters[/bold]")
     total = len(state["outline_items"])
     if args.chapters:
-        total = min(total, args.chapters)
+        if args.resume and state["current_idx"] > 0:
+            # When resuming, --chapters means "write N more chapters from current position"
+            total = min(total, state["current_idx"] + args.chapters)
+        else:
+            # When starting fresh, --chapters means "write up to N chapters total"
+            total = min(total, args.chapters)
 
     with Progress(
         SpinnerColumn(),
