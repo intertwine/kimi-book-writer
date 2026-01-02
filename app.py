@@ -58,12 +58,23 @@ def init_gen_session_state():
         "gen_last_chapter": "",
         "gen_message": "",
         "gen_title": "",
-        "stop_generation": False,
+        "gen_stop_event": threading.Event(),  # Thread-safe stop signal
         "gen_thread": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def reset_generation_state():
+    """Reset all generation state before starting new generation."""
+    st.session_state.gen_status = "idle"
+    st.session_state.gen_progress_current = 0
+    st.session_state.gen_progress_total = 0
+    st.session_state.gen_progress_pct = 0.0
+    st.session_state.gen_last_chapter = ""
+    st.session_state.gen_message = ""
+    st.session_state.gen_stop_event.clear()
 
 
 def is_generation_running() -> bool:
@@ -78,12 +89,15 @@ def cleanup_finished_thread():
     gen_thread = st.session_state.get("gen_thread")
 
     if gen_thread is not None and not gen_thread.is_alive():
-        # Thread finished - give it a moment to finalize state updates
-        time.sleep(0.1)
-
-        # If status is still "running", the worker didn't set final status - assume completed
-        if st.session_state.get("gen_status") == "running":
-            st.session_state.gen_status = "completed"
+        # Wait up to 500ms for status to update (retry loop instead of fixed sleep)
+        for _ in range(5):
+            if st.session_state.get("gen_status") != "running":
+                break
+            time.sleep(0.1)
+        else:
+            # Timeout - worker didn't set final status, assume completed
+            if st.session_state.get("gen_status") == "running":
+                st.session_state.gen_status = "completed"
 
         # Allow garbage collection of finished thread
         st.session_state.gen_thread = None
@@ -306,12 +320,13 @@ def render_generate_tab():
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Clean up finished thread and handle race conditions
+        # Clean up finished thread and handle race conditions.
+        # If thread just finished, trigger rerun to refresh UI with new status.
+        # Note: st.rerun() exits the function immediately, so code below won't execute.
         if cleanup_finished_thread():
-            # Thread just finished - trigger rerun to show completed state
             st.rerun()
 
-        # Get current generation status
+        # Get current generation status (thread is either still running or already cleaned up)
         gen_status = st.session_state.get("gen_status", "idle")
         is_running = is_generation_running()
 
@@ -353,8 +368,7 @@ def render_generate_tab():
                         if existing.exists():
                             st.error(f"A novel with title '{title}' already exists in preview. Please choose a different title or continue the existing one.")
                         else:
-                            # Reset status and start generation
-                            st.session_state.gen_status = "idle"
+                            # Start generation (reset_generation_state() called internally)
                             generate_novel(title, concept, max_chapters, temperature)
                             st.rerun()
 
@@ -388,7 +402,7 @@ def render_generate_tab():
                                         st.error("Failed to publish. Check the logs for details.")
                         else:
                             if st.button("Continue Generation", use_container_width=True):
-                                st.session_state.gen_status = "idle"
+                                # Start generation (reset_generation_state() called internally)
                                 continue_novel(novel)
                                 st.rerun()
 
@@ -415,7 +429,7 @@ def render_generate_tab():
             st.caption(st.session_state.get("gen_message", "Starting..."))
 
             if st.button("⏸️ Pause Generation", use_container_width=True, type="primary"):
-                st.session_state.stop_generation = True
+                st.session_state.gen_stop_event.set()  # Thread-safe stop signal
                 st.rerun()
 
     with col2:
@@ -453,9 +467,9 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             outline_chunks = []
             for chunk in stream:
-                # Check for pause request
-                if st.session_state.get("stop_generation", False):
-                    st.session_state.stop_generation = False
+                # Check for pause request (thread-safe)
+                if st.session_state.gen_stop_event.is_set():
+                    st.session_state.gen_stop_event.clear()
                     st.session_state.gen_status = "paused"
                     st.session_state.gen_message = "Paused during outline generation"
                     return
@@ -477,9 +491,9 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         start_idx = state.get("current_idx", 0) if not is_new else 0
 
         for idx in range(start_idx, total_chapters):
-            # Check for pause request
-            if st.session_state.get("stop_generation", False):
-                st.session_state.stop_generation = False
+            # Check for pause request (thread-safe)
+            if st.session_state.gen_stop_event.is_set():
+                st.session_state.gen_stop_event.clear()
                 st.session_state.gen_status = "paused"
                 st.session_state.gen_message = f"Paused at chapter {idx}/{total_chapters}"
                 return
@@ -508,9 +522,9 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             chapter_chunks = []
             for chunk in stream:
-                # Check for pause request during streaming
-                if st.session_state.get("stop_generation", False):
-                    st.session_state.stop_generation = False
+                # Check for pause request during streaming (thread-safe)
+                if st.session_state.gen_stop_event.is_set():
+                    st.session_state.gen_stop_event.clear()
                     st.session_state.gen_status = "paused"
                     st.session_state.gen_message = f"Paused during chapter {idx + 1}"
                     return
@@ -560,17 +574,13 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
 def start_generation_thread(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict):
     """Start the generation worker in a background thread with Streamlit context."""
-    # Reset progress state
+    # Reset all progress state before starting
+    reset_generation_state()
     st.session_state.gen_status = "running"
     st.session_state.gen_title = title
-    st.session_state.gen_progress_current = 0
-    st.session_state.gen_progress_total = 0
-    st.session_state.gen_progress_pct = 0.0
-    st.session_state.gen_last_chapter = ""
     st.session_state.gen_message = "Starting generation..."
-    st.session_state.stop_generation = False
 
-    # Create and start thread with Streamlit context
+    # Create thread with Streamlit context
     ctx = get_script_run_ctx()
     thread = threading.Thread(
         target=_generation_worker,
@@ -578,8 +588,16 @@ def start_generation_thread(title: str, concept: str, max_chapters: int, tempera
         daemon=True
     )
     add_script_run_ctx(thread, ctx)
-    st.session_state.gen_thread = thread
-    thread.start()
+
+    # Start thread with error handling
+    try:
+        thread.start()
+        st.session_state.gen_thread = thread
+    except Exception as e:
+        logger.error(f"Failed to start generation thread: {e}", exc_info=True)
+        st.session_state.gen_status = "error"
+        st.session_state.gen_message = "Failed to start generation. Please try again."
+        st.session_state.gen_thread = None
 
 
 def generate_novel(title: str, concept: str, max_chapters: int, temperature: float):
@@ -679,7 +697,7 @@ def render_novel_list(preview: bool):
                     else:
                         # Show Continue button for incomplete novels (disabled if generation is running)
                         if st.button("▶️ Continue", key=f"continue_{novel['slug']}", disabled=is_running):
-                            st.session_state.gen_status = "idle"
+                            # Start generation (reset_generation_state() called internally)
                             continue_novel(novel)
                             st.rerun()
 
