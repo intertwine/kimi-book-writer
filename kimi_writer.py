@@ -103,13 +103,22 @@ def chat_complete_stream(client: OpenAI, model: str, messages: List[Dict], tempe
     )
 
 def stream_to_text(stream) -> str:
-    chunks=[]
+    chunks = []
     for chunk in stream:
         delta = chunk.choices[0].delta
-        if getattr(delta, "content", None):
-            chunks.append(delta.content)
-            if len(chunks) % 50 == 0:
-                sys.stdout.write("."); sys.stdout.flush()
+
+        # Kimi K2 thinking models may return content in delta.thinking or delta.content
+        content = getattr(delta, "content", None)
+        thinking = getattr(delta, "thinking", None)
+
+        if content:
+            chunks.append(content)
+        elif thinking:
+            chunks.append(thinking)
+
+        if len(chunks) % 50 == 0:
+            sys.stdout.write(".")
+            sys.stdout.flush()
     sys.stdout.write("\n")
     return "".join(chunks)
 

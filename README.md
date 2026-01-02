@@ -52,6 +52,9 @@ The easiest way to get started is using GitHub Codespaces:
 **Web UI Features:**
 
 - 📝 **Generate** - Create new novels with a user-friendly form
+- ⏸️ **Pause/Resume** - Stop generation anytime and continue later
+- 📊 **Live Progress** - Real-time sidebar progress panel with chapter-by-chapter updates
+- 🔄 **Background Generation** - Non-blocking UI; generation runs in background thread
 - 📚 **Library** - Manage preview and published novels
 - 📖 **Reader** - Read novels with chapter navigation
 - ✅ **Publish** - Move novels from preview to published (auto-commits to repo)
@@ -114,12 +117,12 @@ Useful flags:
 - `--resume` Continue from `novel_state.json`
 - `--chapters N` Limit number of chapters to write:
   - **Without `--resume`**: Write up to N chapters total (e.g., `--chapters 3` writes chapters 1-3)
-  - **With `--resume`**: Write N *more* chapters from current progress (e.g., if 5 chapters exist, `--resume --chapters 3` writes chapters 6-8)
+  - **With `--resume`**: Write N _more_ chapters from current progress (e.g., if 5 chapters exist, `--resume --chapters 3` writes chapters 6-8)
 
 Artifacts:
 
-- `book.md` - full Markdown (title, outline, chapters)
-- `novel_state.json` - checkpoint/resume state
+- `novel.md` - full Markdown output (title, outline, chapters) — customizable via `--out`
+- `novel_state.json` - checkpoint/resume state for the CLI
 
 ---
 
@@ -137,21 +140,24 @@ Artifacts:
 1. **Generate Tab**
 
    - Enter novel concept, title, and settings
-   - Watch real-time generation progress
-   - Novels saved to `preview/` directory (gitignored)
-   - Resume incomplete novels anytime
+   - Generation runs in background thread (UI stays responsive)
+   - Live progress panel in sidebar shows current chapter
+   - Pause anytime with the pause button; resume from Library
+   - Novels auto-saved to `preview/` directory after each chapter
 
 2. **Library Tab**
 
    - Browse preview and published novels
+   - Continue incomplete novels with one click
    - Read novels with chapter navigation
    - Download as Markdown files
-   - Publish to move from preview → published (commits to repo)
+   - Publish complete novels (moves to `published/`, commits to repo)
    - Delete unwanted novels
 
 3. **Reader Mode**
    - Clean reading interface
-   - Chapter-by-chapter navigation
+   - Chapter-by-chapter navigation with dropdown selector
+   - Previous/Next chapter buttons
    - Full markdown rendering
 
 ### Why K2 _thinking/turbo_?
@@ -166,23 +172,44 @@ From the quickstart:
 
 ```
 kimi-book-writer/
-├── app.py                 # Streamlit web UI
+├── app.py                 # Streamlit web UI (background thread generation)
 ├── kimi_writer.py         # CLI novel generator
-├── utils.py               # Helper utilities
+├── utils.py               # Shared utilities (outline parsing)
+├── run-ui.sh              # Helper script to launch web UI
+├── tests/                 # pytest test suite
+│   ├── conftest.py        # Test fixtures
+│   ├── test_kimi_writer.py
+│   └── test_utils.py
 ├── preview/               # Draft novels (gitignored)
 ├── published/             # Published novels (committed)
 ├── examples/              # Example generated novels
 ├── .devcontainer/         # Codespaces configuration
 ├── .env.example           # Environment template
-└── pyproject.toml         # Dependencies
+├── pyproject.toml         # Dependencies (Python 3.10+, Streamlit 1.37+)
+├── AGENTS.md              # Repository guidelines for AI assistants
+└── CLAUDE.md              # Project-specific instructions
 ```
 
 ## Notes
 
-- Both the CLI and Web UI share the same core generation logic
+- Both the CLI and Web UI share the same core generation logic and prompts
 - Prompts in `kimi_writer.py` can be customized for different genres/styles
-- The Web UI provides better progress tracking and novel management
-- CLI is useful for automation and scripting workflows
+- The Web UI runs generation in a background thread, so the UI remains responsive
+- Progress is saved after each chapter, enabling safe pause/resume
+- Requires **Streamlit 1.37.0+** for the `@st.fragment(run_every=...)` auto-refresh feature
+- Supports **Kimi K2 thinking models** which return content via `delta.thinking` streaming
+- CLI is useful for automation, scripting, and headless server workflows
+
+## Testing
+
+Run the test suite with:
+
+```bash
+uv run pytest        # Using uv (recommended)
+pytest               # Using pip-installed pytest
+```
+
+Tests are deterministic and do not make live API calls.
 
 ## License
 

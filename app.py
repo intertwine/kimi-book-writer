@@ -488,6 +488,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
 
             outline_chunks = []
+            chunk_count = 0
             for chunk in stream:
                 # Check for pause request with lock to prevent race conditions
                 with _gen_state_lock:
@@ -496,14 +497,43 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                         st.session_state.gen_stop_event.clear()  # Clear after state transition
                         return
 
+                chunk_count += 1
                 delta = chunk.choices[0].delta
-                if getattr(delta, "content", None):
-                    outline_chunks.append(delta.content)
+
+                # Kimi K2 thinking models may return content in delta.thinking or delta.content
+                # Prefer content, but fall back to thinking if content is empty
+                content = getattr(delta, "content", None)
+                thinking = getattr(delta, "thinking", None)
+
+                if content:
+                    outline_chunks.append(content)
+                elif thinking:
+                    # Log first occurrence of thinking-only response for debugging
+                    if not outline_chunks and chunk_count == 1:
+                        logger.info("Outline stream: receiving thinking tokens (Kimi K2 thinking model)")
+                    outline_chunks.append(thinking)
+
+            logger.info(f"Outline stream completed: {chunk_count} chunks, {len(outline_chunks)} content chunks")
 
             outline = "".join(outline_chunks).strip()
             state["outline_text"] = outline
             state["outline_items"] = extract_outline_items(outline)[:max_chapters]
             save_novel_state(title, state, preview=True)
+
+            # Validate outline was generated successfully
+            if not state["outline_items"]:
+                logger.error(f"Outline generation failed: no chapters extracted. Outline text length: {len(outline)}")
+                if not outline:
+                    _update_gen_state(
+                        gen_status="error",
+                        gen_message="Outline generation failed: no content received from API. Please try again."
+                    )
+                else:
+                    _update_gen_state(
+                        gen_status="error",
+                        gen_message=f"Outline generation failed: could not parse chapter titles from outline ({len(outline)} chars received)."
+                    )
+                return
 
             _update_gen_state(gen_message=f"Outline created with {len(state['outline_items'])} chapters")
 
@@ -554,8 +584,15 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                         return
 
                 delta = chunk.choices[0].delta
-                if getattr(delta, "content", None):
-                    chapter_chunks.append(delta.content)
+
+                # Kimi K2 thinking models may return content in delta.thinking or delta.content
+                content = getattr(delta, "content", None)
+                thinking = getattr(delta, "thinking", None)
+
+                if content:
+                    chapter_chunks.append(content)
+                elif thinking:
+                    chapter_chunks.append(thinking)
 
             chapter_md = "".join(chapter_chunks).strip()
             if not chapter_md.lstrip().startswith("##"):
