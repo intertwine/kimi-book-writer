@@ -47,10 +47,10 @@ PUBLISHED_DIR.mkdir(exist_ok=True)
 
 # Generation constants
 THREAD_CLEANUP_TIMEOUT_SEC = 0.5  # Max time to wait for thread status update
-THREAD_CLEANUP_POLL_INTERVAL_SEC = 0.1  # Polling interval during cleanup
 SIDEBAR_REFRESH_INTERVAL_SEC = 1  # Auto-refresh interval for progress panel
 CONTEXT_RECENT_CHAPTERS = 3  # Number of recent chapters for context
 CONTEXT_CHAR_LIMIT = 2000  # Character limit per chapter in context
+ERROR_MESSAGE_MAX_LENGTH = 250  # Max length for user-facing error messages
 
 # Type alias for generation status
 GenStatus = Literal["idle", "running", "paused", "completed", "error"]
@@ -100,19 +100,22 @@ def cleanup_finished_thread() -> bool:
     """Clean up finished thread to allow garbage collection and handle race conditions."""
     gen_thread = st.session_state.get("gen_thread")
 
-    if gen_thread is not None and not gen_thread.is_alive():
-        # Use thread.join() with timeout for proper synchronization
+    if gen_thread is not None:
+        # Use join() unconditionally with timeout to avoid TOCTOU race
+        # (thread could complete between is_alive() check and join())
         gen_thread.join(timeout=THREAD_CLEANUP_TIMEOUT_SEC)
 
-        # If status is still "running" after join, worker didn't set final status
-        if st.session_state.get("gen_status") == "running":
-            with _gen_state_lock:
-                st.session_state.gen_status = "completed"
+        # After join, check if thread is actually done
+        if not gen_thread.is_alive():
+            # If status is still "running" after join, worker didn't set final status
+            if st.session_state.get("gen_status") == "running":
+                with _gen_state_lock:
+                    st.session_state.gen_status = "completed"
 
-        # Allow garbage collection of finished thread
-        st.session_state.gen_thread = None
-        return True  # Thread was cleaned up
-    return False  # No cleanup needed
+            # Allow garbage collection of finished thread
+            st.session_state.gen_thread = None
+            return True  # Thread was cleaned up
+    return False  # No cleanup needed or thread still running
 
 
 # Page config
@@ -457,10 +460,11 @@ def render_generate_tab():
             """)
 
 def _update_gen_state(**kwargs) -> None:
-    """Thread-safe helper to update generation state."""
+    """Thread-safe helper to update generation state atomically."""
     with _gen_state_lock:
-        for key, value in kwargs.items():
-            setattr(st.session_state, key, value)
+        # Use update() to apply all changes atomically, minimizing the window
+        # where partially-updated state could be observed by the UI thread
+        st.session_state.update(kwargs)
 
 
 def _generation_worker(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict) -> None:
@@ -485,11 +489,12 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             outline_chunks = []
             for chunk in stream:
-                # Check for pause request (thread-safe Event)
-                if st.session_state.gen_stop_event.is_set():
-                    st.session_state.gen_stop_event.clear()
-                    _update_gen_state(gen_status="paused", gen_message="Paused during outline generation")
-                    return
+                # Check for pause request with lock to prevent race conditions
+                with _gen_state_lock:
+                    if st.session_state.gen_stop_event.is_set():
+                        st.session_state.update({"gen_status": "paused", "gen_message": "Paused during outline generation"})
+                        st.session_state.gen_stop_event.clear()  # Clear after state transition
+                        return
 
                 delta = chunk.choices[0].delta
                 if getattr(delta, "content", None):
@@ -508,11 +513,12 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         start_idx = state.get("current_idx", 0) if not is_new else 0
 
         for idx in range(start_idx, total_chapters):
-            # Check for pause request (thread-safe Event)
-            if st.session_state.gen_stop_event.is_set():
-                st.session_state.gen_stop_event.clear()
-                _update_gen_state(gen_status="paused", gen_message=f"Paused at chapter {idx}/{total_chapters}")
-                return
+            # Check for pause request with lock to prevent race conditions
+            with _gen_state_lock:
+                if st.session_state.gen_stop_event.is_set():
+                    st.session_state.update({"gen_status": "paused", "gen_message": f"Paused at chapter {idx}/{total_chapters}"})
+                    st.session_state.gen_stop_event.clear()  # Clear after state transition
+                    return
 
             chapter_title = state["outline_items"][idx]
             _update_gen_state(
@@ -540,11 +546,12 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             chapter_chunks = []
             for chunk in stream:
-                # Check for pause request during streaming (thread-safe Event)
-                if st.session_state.gen_stop_event.is_set():
-                    st.session_state.gen_stop_event.clear()
-                    _update_gen_state(gen_status="paused", gen_message=f"Paused during chapter {idx + 1}")
-                    return
+                # Check for pause request with lock to prevent race conditions
+                with _gen_state_lock:
+                    if st.session_state.gen_stop_event.is_set():
+                        st.session_state.update({"gen_status": "paused", "gen_message": f"Paused during chapter {idx + 1}"})
+                        st.session_state.gen_stop_event.clear()  # Clear after state transition
+                        return
 
                 delta = chunk.choices[0].delta
                 if getattr(delta, "content", None):
@@ -584,8 +591,12 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         elif "insufficient" in error_msg or "quota" in error_msg or "balance" in error_msg:
             user_msg = "API quota exceeded. Please check your account balance."
         else:
-            # Truncate long error messages
-            user_msg = f"Generation failed: {str(e)[:150]}"
+            # Truncate long error messages, preserving useful context
+            error_str = str(e)
+            if len(error_str) > ERROR_MESSAGE_MAX_LENGTH:
+                user_msg = f"Generation failed: {error_str[:ERROR_MESSAGE_MAX_LENGTH]}..."
+            else:
+                user_msg = f"Generation failed: {error_str}"
 
         _update_gen_state(gen_status="error", gen_message=user_msg)
 
