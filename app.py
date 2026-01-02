@@ -60,12 +60,35 @@ def init_gen_session_state():
         "gen_title": "",
         "stop_generation": False,
         "gen_thread": None,
-        "generating": False,
-        "gen_params": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+def is_generation_running() -> bool:
+    """Check if generation thread is actively running."""
+    gen_status = st.session_state.get("gen_status", "idle")
+    gen_thread = st.session_state.get("gen_thread")
+    return gen_status == "running" and gen_thread is not None and gen_thread.is_alive()
+
+
+def cleanup_finished_thread():
+    """Clean up finished thread to allow garbage collection and handle race conditions."""
+    gen_thread = st.session_state.get("gen_thread")
+
+    if gen_thread is not None and not gen_thread.is_alive():
+        # Thread finished - give it a moment to finalize state updates
+        time.sleep(0.1)
+
+        # If status is still "running", the worker didn't set final status - assume completed
+        if st.session_state.get("gen_status") == "running":
+            st.session_state.gen_status = "completed"
+
+        # Allow garbage collection of finished thread
+        st.session_state.gen_thread = None
+        return True  # Thread was cleaned up
+    return False  # No cleanup needed
 
 
 # Page config
@@ -233,10 +256,15 @@ def publish_novel(title: str):
             logger.info(f"Successfully published and committed novel: {title}")
 
         # Remove preview files after successful publish
-        if preview_state.exists():
-            preview_state.unlink()
-        if preview_md.exists():
-            preview_md.unlink()
+        try:
+            if preview_state.exists():
+                preview_state.unlink()
+            if preview_md.exists():
+                preview_md.unlink()
+            logger.info(f"Cleaned up preview files for '{title}'")
+        except OSError as e:
+            logger.warning(f"Could not delete preview files for '{title}': {e}")
+            # Non-critical - publish still succeeded
 
         return True
 
@@ -278,23 +306,14 @@ def render_generate_tab():
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Get current generation status
-        gen_status = st.session_state.get("gen_status", "idle")
-
-        # Check if thread is still alive (generation truly running)
-        gen_thread = st.session_state.get("gen_thread")
-        thread_alive = gen_thread is not None and gen_thread.is_alive()
-
-        # If thread died but status is still running, update status and trigger refresh
-        if gen_status == "running" and not thread_alive:
-            # Thread finished - status should have been set by worker
-            # If not, assume completed
-            if st.session_state.get("gen_status") == "running":
-                st.session_state.gen_status = "completed"
-            # Trigger a rerun to show the completed state
+        # Clean up finished thread and handle race conditions
+        if cleanup_finished_thread():
+            # Thread just finished - trigger rerun to show completed state
             st.rerun()
 
-        is_running = gen_status == "running" and thread_alive
+        # Get current generation status
+        gen_status = st.session_state.get("gen_status", "idle")
+        is_running = is_generation_running()
 
         if not is_running:
             # Mode selection - disabled if generation just completed/errored
@@ -521,7 +540,22 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
     except Exception as e:
         logger.error(f"Error during novel generation: {e}", exc_info=True)
         st.session_state.gen_status = "error"
-        st.session_state.gen_message = f"Error: {str(e)}"
+
+        # User-friendly error messages
+        error_msg = str(e).lower()
+        if "api.moonshot.ai" in error_msg or "connection" in error_msg or "timeout" in error_msg:
+            user_msg = "API connection failed. Check your internet connection and API key."
+        elif "rate limit" in error_msg or "429" in error_msg:
+            user_msg = "API rate limit exceeded. Please wait a few minutes and try again."
+        elif "401" in error_msg or "unauthorized" in error_msg or "api key" in error_msg:
+            user_msg = "Invalid API key. Please check your MOONSHOT_API_KEY in .env file."
+        elif "insufficient" in error_msg or "quota" in error_msg or "balance" in error_msg:
+            user_msg = "API quota exceeded. Please check your account balance."
+        else:
+            # Truncate long error messages
+            user_msg = f"Generation failed: {str(e)[:150]}"
+
+        st.session_state.gen_message = user_msg
 
 
 def start_generation_thread(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict):
@@ -634,9 +668,7 @@ def render_novel_list(preview: bool):
             with col3:
                 if preview:
                     # Check if generation is currently running
-                    gen_status = st.session_state.get("gen_status", "idle")
-                    gen_thread = st.session_state.get("gen_thread")
-                    is_running = gen_status == "running" and gen_thread is not None and gen_thread.is_alive()
+                    is_running = is_generation_running()
 
                     if novel['chapters_written'] >= novel['total_chapters']:
                         if st.button("✅ Publish", key=f"publish_{novel['slug']}"):
@@ -758,8 +790,6 @@ def render_reader():
 def render_sidebar_progress():
     """Auto-refreshing sidebar progress panel for generation status."""
     gen_status = st.session_state.get("gen_status", "idle")
-    gen_thread = st.session_state.get("gen_thread")
-    thread_alive = gen_thread is not None and gen_thread.is_alive()
 
     # Only show progress panel if there's active or recent generation
     if gen_status == "idle":
@@ -767,7 +797,7 @@ def render_sidebar_progress():
 
     st.markdown("### Generation Progress")
 
-    if gen_status == "running" and thread_alive:
+    if is_generation_running():
         # Active generation
         title = st.session_state.get("gen_title", "Novel")
         progress_pct = st.session_state.get("gen_progress_pct", 0)
