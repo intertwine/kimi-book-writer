@@ -5,16 +5,20 @@ Kimi Book Writer Web UI
 A Streamlit-based web interface for generating, managing, and reading novels.
 """
 import streamlit as st
+import copy
 import os
 import json
 import shutil
 import subprocess
 import re
 import logging
+import threading
+import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Literal
 from dotenv import load_dotenv
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 # Load environment variables from .env file (must happen before importing kimi_writer)
 load_dotenv()
@@ -40,6 +44,79 @@ PREVIEW_DIR = Path("preview")
 PUBLISHED_DIR = Path("published")
 PREVIEW_DIR.mkdir(exist_ok=True)
 PUBLISHED_DIR.mkdir(exist_ok=True)
+
+# Generation constants
+THREAD_CLEANUP_TIMEOUT_SEC = 0.5  # Max time to wait for thread status update
+SIDEBAR_REFRESH_INTERVAL_SEC = 1  # Auto-refresh interval for progress panel
+CONTEXT_RECENT_CHAPTERS = 3  # Number of recent chapters for context
+CONTEXT_CHAR_LIMIT = 2000  # Character limit per chapter in context
+ERROR_MESSAGE_MAX_LENGTH = 250  # Max length for user-facing error messages
+
+# Type alias for generation status
+GenStatus = Literal["idle", "running", "paused", "completed", "error"]
+
+# Lock for thread-safe session state updates from worker thread
+_gen_state_lock = threading.Lock()
+
+
+def init_gen_session_state() -> None:
+    """Initialize generation-related session state keys if they don't exist."""
+    defaults = {
+        "gen_status": "idle",  # GenStatus
+        "gen_progress_current": 0,
+        "gen_progress_total": 0,
+        "gen_progress_pct": 0.0,
+        "gen_last_chapter": "",
+        "gen_message": "",
+        "gen_title": "",
+        "gen_stop_event": threading.Event(),  # Thread-safe stop signal
+        "gen_thread": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def reset_generation_state() -> None:
+    """Reset all generation state before starting new generation."""
+    st.session_state.gen_status = "idle"
+    st.session_state.gen_progress_current = 0
+    st.session_state.gen_progress_total = 0
+    st.session_state.gen_progress_pct = 0.0
+    st.session_state.gen_last_chapter = ""
+    st.session_state.gen_message = ""
+    # Create fresh Event to avoid stale state from previous generation cycles
+    st.session_state.gen_stop_event = threading.Event()
+
+
+def is_generation_running() -> bool:
+    """Check if generation thread is actively running."""
+    gen_status = st.session_state.get("gen_status", "idle")
+    gen_thread = st.session_state.get("gen_thread")
+    return gen_status == "running" and gen_thread is not None and gen_thread.is_alive()
+
+
+def cleanup_finished_thread() -> bool:
+    """Clean up finished thread to allow garbage collection and handle race conditions."""
+    gen_thread = st.session_state.get("gen_thread")
+
+    if gen_thread is not None:
+        # Use join() unconditionally with timeout to avoid TOCTOU race
+        # (thread could complete between is_alive() check and join())
+        gen_thread.join(timeout=THREAD_CLEANUP_TIMEOUT_SEC)
+
+        # After join, check if thread is actually done
+        if not gen_thread.is_alive():
+            # If status is still "running" after join, worker didn't set final status
+            if st.session_state.get("gen_status") == "running":
+                with _gen_state_lock:
+                    st.session_state.gen_status = "completed"
+
+            # Allow garbage collection of finished thread
+            st.session_state.gen_thread = None
+            return True  # Thread was cleaned up
+    return False  # No cleanup needed or thread still running
+
 
 # Page config
 st.set_page_config(
@@ -195,16 +272,27 @@ def publish_novel(title: str):
         if result.returncode == 0:
             # No changes to commit (file already published with same content)
             logger.info(f"Novel '{title}' already published with same content, no commit needed")
-            return True
+        else:
+            # Commit the changes
+            subprocess.run(
+                ["git", "commit", "-m", f"Publish novel: {title}"],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            logger.info(f"Successfully published and committed novel: {title}")
 
-        # Commit the changes
-        subprocess.run(
-            ["git", "commit", "-m", f"Publish novel: {title}"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        logger.info(f"Successfully published and committed novel: {title}")
+        # Remove preview files after successful publish
+        try:
+            if preview_state.exists():
+                preview_state.unlink()
+            if preview_md.exists():
+                preview_md.unlink()
+            logger.info(f"Cleaned up preview files for '{title}'")
+        except OSError as e:
+            logger.warning(f"Could not delete preview files for '{title}': {e}")
+            # Non-critical - publish still succeeded
+
         return True
 
     except subprocess.CalledProcessError as e:
@@ -245,11 +333,18 @@ def render_generate_tab():
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Check if generation is in progress
-        is_generating = st.session_state.get("generating", False)
+        # Clean up finished thread and handle race conditions.
+        # If thread just finished, trigger rerun to refresh UI with new status.
+        # Note: st.rerun() exits the function immediately, so code below won't execute.
+        if cleanup_finished_thread():
+            st.rerun()
 
-        if not is_generating:
-            # Mode selection
+        # Get current generation status (thread is either still running or already cleaned up)
+        gen_status = st.session_state.get("gen_status", "idle")
+        is_running = is_generation_running()
+
+        if not is_running:
+            # Mode selection - disabled if generation just completed/errored
             mode = st.radio(
                 "Mode",
                 ["New Novel", "Continue Existing"],
@@ -286,14 +381,8 @@ def render_generate_tab():
                         if existing.exists():
                             st.error(f"A novel with title '{title}' already exists in preview. Please choose a different title or continue the existing one.")
                         else:
-                            st.session_state.generating = True
-                            st.session_state.gen_params = {
-                                "mode": "new",
-                                "title": title,
-                                "concept": concept,
-                                "max_chapters": max_chapters,
-                                "temperature": temperature
-                            }
+                            # Start generation (reset_generation_state() called internally)
+                            generate_novel(title, concept, max_chapters, temperature)
                             st.rerun()
 
             else:  # Continue Existing
@@ -311,33 +400,50 @@ def render_generate_tab():
                         st.info(f"**Concept:** {novel['concept']}")
                         st.info(f"**Progress:** {novel['chapters_written']}/{novel['total_chapters']} chapters")
 
-                        if novel['chapters_written'] >= novel['total_chapters']:
-                            st.success("✅ This novel is complete!")
+                        is_complete = novel['chapters_written'] >= novel['total_chapters'] and novel['total_chapters'] > 0
 
-                        if st.button("Continue Generation", use_container_width=True):
-                            st.session_state.generating = True
-                            st.session_state.gen_params = {
-                                "mode": "continue",
-                                "novel": novel
-                            }
-                            st.rerun()
+                        if is_complete:
+                            st.success("✅ This novel is complete!")
+                            if st.button("✅ Publish", use_container_width=True, type="primary"):
+                                with st.spinner("Publishing and committing to git..."):
+                                    if publish_novel(novel['title']):
+                                        st.balloons()
+                                        st.success(f"🎉 '{novel['title']}' published successfully! Moved to Published library.")
+                                        time.sleep(1.5)  # Brief pause to show success message
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to publish. Check the logs for details.")
+                        else:
+                            if st.button("Continue Generation", use_container_width=True):
+                                # Start generation (reset_generation_state() called internally)
+                                continue_novel(novel)
+                                st.rerun()
+
+            # Show status message for completed/paused/error states
+            if gen_status == "completed":
+                st.success(f"🎉 {st.session_state.get('gen_message', 'Generation completed!')}")
+                if st.button("✅ Generation Completed", disabled=True, use_container_width=True):
+                    pass
+            elif gen_status == "paused":
+                st.warning(f"⏸️ {st.session_state.get('gen_message', 'Generation paused.')}")
+            elif gen_status == "error":
+                st.error(f"❌ {st.session_state.get('gen_message', 'An error occurred.')}")
+                if st.button("⚠️ Generation Error", disabled=True, use_container_width=True):
+                    pass
 
         else:
             # Generation in progress - show pause button
             st.caption("Progress is saved after each chapter. You can pause and continue later from the Library.")
+            st.info(f"**Generating:** {st.session_state.get('gen_title', 'Novel')}")
+
+            # Show current progress in the main area too
+            progress_pct = st.session_state.get("gen_progress_pct", 0)
+            st.progress(progress_pct)
+            st.caption(st.session_state.get("gen_message", "Starting..."))
+
             if st.button("⏸️ Pause Generation", use_container_width=True, type="primary"):
-                st.session_state.stop_generation = True
-
-            # Run the appropriate generation function
-            params = st.session_state.get("gen_params", {})
-            if params.get("mode") == "new":
-                generate_novel(params["title"], params["concept"], params["max_chapters"], params["temperature"])
-            elif params.get("mode") == "continue":
-                continue_novel(params["novel"])
-
-            # Generation complete - reset state
-            st.session_state.generating = False
-            st.session_state.gen_params = {}
+                st.session_state.gen_stop_event.set()  # Thread-safe stop signal
+                st.rerun()
 
     with col2:
         with st.expander("💡 Tips", expanded=True):
@@ -353,70 +459,80 @@ def render_generate_tab():
 *"A cyberpunk thriller set in 2150 Tokyo. A rogue AI detective must solve a series of murders in the virtual realm while questioning their own consciousness. Themes: identity, reality vs simulation, corporate dystopia."*
             """)
 
-def generate_novel(title: str, concept: str, max_chapters: int, temperature: float):
-    """Generate a new novel from scratch."""
-    try:
-        # Initialize state
-        state = init_novel_state(title, concept)
-        state["temperature"] = temperature
+def _update_gen_state(**kwargs) -> None:
+    """Thread-safe helper to update generation state atomically."""
+    with _gen_state_lock:
+        # Use update() to apply all changes atomically, minimizing the window
+        # where partially-updated state could be observed by the UI thread
+        st.session_state.update(kwargs)
 
-        # Get client
+
+def _generation_worker(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict) -> None:
+    """
+    Background worker for novel generation.
+    Updates session state with progress; does NOT call Streamlit UI methods.
+    Uses _gen_state_lock for thread-safe state updates.
+    """
+    try:
         client = get_client()
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Generate outline
-        st.markdown("---")
-        st.markdown("### 📋 Generating Outline...")
-
-        with st.spinner("Creating outline..."):
+        # Phase 1: Generate outline (only for new novels)
+        if is_new:
+            _update_gen_state(gen_message="Generating outline...")
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},
                 {"role": "user", "content": f"{OUTLINE_PROMPT}\n\nConcept: {concept}"}
             ]
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
 
-            # Collect outline
             outline_chunks = []
-            outline_placeholder = st.empty()
             for chunk in stream:
+                # Check for pause request with lock to prevent race conditions
+                with _gen_state_lock:
+                    if st.session_state.gen_stop_event.is_set():
+                        st.session_state.update({"gen_status": "paused", "gen_message": "Paused during outline generation"})
+                        st.session_state.gen_stop_event.clear()  # Clear after state transition
+                        return
+
                 delta = chunk.choices[0].delta
                 if getattr(delta, "content", None):
                     outline_chunks.append(delta.content)
-                    outline_placeholder.markdown("".join(outline_chunks))
 
             outline = "".join(outline_chunks).strip()
             state["outline_text"] = outline
             state["outline_items"] = extract_outline_items(outline)[:max_chapters]
-
             save_novel_state(title, state, preview=True)
 
-        st.success(f"✅ Outline created with {len(state['outline_items'])} chapters!")
+            _update_gen_state(gen_message=f"Outline created with {len(state['outline_items'])} chapters")
 
-        # Generate chapters
-        st.markdown("### ✍️ Writing Chapters...")
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        chapter_display = st.empty()
-
+        # Phase 2: Generate chapters
         total_chapters = len(state["outline_items"])
+        _update_gen_state(gen_progress_total=total_chapters)
+        start_idx = state.get("current_idx", 0) if not is_new else 0
 
-        for idx in range(total_chapters):
-            # Check if stop was requested
-            if st.session_state.get("stop_generation", False):
-                st.session_state.stop_generation = False
-                st.session_state.generating = False
-                st.warning(f"⏸️ Generation paused at chapter {idx}/{total_chapters}. You can continue from the Library tab.")
-                st.rerun()
+        for idx in range(start_idx, total_chapters):
+            # Check for pause request with lock to prevent race conditions
+            with _gen_state_lock:
+                if st.session_state.gen_stop_event.is_set():
+                    st.session_state.update({"gen_status": "paused", "gen_message": f"Paused at chapter {idx}/{total_chapters}"})
+                    st.session_state.gen_stop_event.clear()  # Clear after state transition
+                    return
 
             chapter_title = state["outline_items"][idx]
-            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {strip_markdown_formatting(chapter_title)}")
+            _update_gen_state(
+                gen_progress_current=idx + 1,
+                gen_progress_pct=(idx + 1) / total_chapters,
+                gen_last_chapter=strip_markdown_formatting(chapter_title),
+                gen_message=f"Writing Chapter {idx + 1}/{total_chapters}: {strip_markdown_formatting(chapter_title)}"
+            )
 
-            # Build context (only include if there are previous chapters)
+            # Build context using constants
             user_content = f"Novel concept:\n{concept}\n\n"
             if state["chapters"]:
                 context_snippets = "\n\n".join(
-                    ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
+                    ch.get("content", "")[-CONTEXT_CHAR_LIMIT:] for ch in state["chapters"][-CONTEXT_RECENT_CHAPTERS:]
                 )
                 user_content += f"Existing recent context (last chapters excerpts):\n{context_snippets}\n\n"
             user_content += CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)
@@ -428,9 +544,15 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
 
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
 
-            # Collect chapter
             chapter_chunks = []
             for chunk in stream:
+                # Check for pause request with lock to prevent race conditions
+                with _gen_state_lock:
+                    if st.session_state.gen_stop_event.is_set():
+                        st.session_state.update({"gen_status": "paused", "gen_message": f"Paused during chapter {idx + 1}"})
+                        st.session_state.gen_stop_event.clear()  # Clear after state transition
+                        return
+
                 delta = chunk.choices[0].delta
                 if getattr(delta, "content", None):
                     chapter_chunks.append(delta.content)
@@ -447,100 +569,92 @@ def generate_novel(title: str, concept: str, max_chapters: int, temperature: flo
             md_path = get_novel_md_path(title, preview=True)
             md_path.write_text(build_book_markdown(state), encoding="utf-8")
 
-            # Update progress
-            progress_bar.progress((idx + 1) / total_chapters)
-            chapter_display.markdown(f"**Latest:** {chapter_title}")
-
-        st.success(f"🎉 Novel complete! {total_chapters} chapters written.")
-        st.balloons()
+        # Completed successfully
+        _update_gen_state(
+            gen_status="completed",
+            gen_progress_pct=1.0,
+            gen_progress_current=total_chapters,
+            gen_message=f"Novel complete! {total_chapters} chapters written."
+        )
 
     except Exception as e:
-        # Log full traceback server-side
         logger.error(f"Error during novel generation: {e}", exc_info=True)
-        # Display user-friendly error message
-        st.error(f"❌ Error during generation: {str(e)}")
-        st.info("The error has been logged. Please check your API key and try again.")
 
-def continue_novel(novel: Dict):
-    """Continue generating an incomplete novel."""
+        # User-friendly error messages
+        error_msg = str(e).lower()
+        if "api.moonshot.ai" in error_msg or "connection" in error_msg or "timeout" in error_msg:
+            user_msg = "API connection failed. Check your internet connection and API key."
+        elif "rate limit" in error_msg or "429" in error_msg:
+            user_msg = "API rate limit exceeded. Please wait a few minutes and try again."
+        elif "401" in error_msg or "unauthorized" in error_msg or "api key" in error_msg:
+            user_msg = "Invalid API key. Please check your MOONSHOT_API_KEY in .env file."
+        elif "insufficient" in error_msg or "quota" in error_msg or "balance" in error_msg:
+            user_msg = "API quota exceeded. Please check your account balance."
+        else:
+            # Truncate long error messages, preserving useful context
+            error_str = str(e)
+            if len(error_str) > ERROR_MESSAGE_MAX_LENGTH:
+                user_msg = f"Generation failed: {error_str[:ERROR_MESSAGE_MAX_LENGTH]}..."
+            else:
+                user_msg = f"Generation failed: {error_str}"
+
+        _update_gen_state(gen_status="error", gen_message=user_msg)
+
+
+def start_generation_thread(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict) -> None:
+    """Start the generation worker in a background thread with Streamlit context."""
+    # Reset all progress state before starting
+    reset_generation_state()
+    st.session_state.gen_status = "running"
+    st.session_state.gen_title = title
+    st.session_state.gen_message = "Starting generation..."
+
+    # Deep copy state to prevent race conditions with shared dict mutation
+    state_copy = copy.deepcopy(state)
+
+    # Create thread with Streamlit context
+    # Note: daemon=True ensures thread won't block app shutdown, but may leave
+    # novels in incomplete state. This is acceptable since state is saved after each chapter.
+    ctx = get_script_run_ctx()
+    thread = threading.Thread(
+        target=_generation_worker,
+        args=(title, concept, max_chapters, temperature, is_new, state_copy),
+        daemon=True
+    )
+    add_script_run_ctx(thread, ctx)
+
+    # Start thread with error handling
     try:
-        state = novel["state"]
-        title = state["title"]
-
-        if state["current_idx"] >= len(state["outline_items"]):
-            st.info("This novel is already complete!")
-            return
-
-        client = get_client()
-        model = state["model"]
-        temperature = state["temperature"]
-        max_tokens = state["max_output_tokens"]
-
-        st.markdown("---")
-        st.markdown("### ✍️ Continuing Novel...")
-
-        progress_bar = st.progress(state["current_idx"] / len(state["outline_items"]))
-        status_text = st.empty()
-        chapter_display = st.empty()
-
-        total_chapters = len(state["outline_items"])
-
-        for idx in range(state["current_idx"], total_chapters):
-            # Check if stop was requested
-            if st.session_state.get("stop_generation", False):
-                st.session_state.stop_generation = False
-                st.session_state.generating = False
-                st.warning(f"⏸️ Generation paused at chapter {idx}/{total_chapters}. You can continue from the Library tab.")
-                st.rerun()
-
-            chapter_title = state["outline_items"][idx]
-            status_text.text(f"Writing Chapter {idx + 1}/{total_chapters}: {strip_markdown_formatting(chapter_title)}")
-
-            # Build context (only include if there are previous chapters)
-            user_content = f"Novel concept:\n{state['concept']}\n\n"
-            if state["chapters"]:
-                context_snippets = "\n\n".join(
-                    ch.get("content", "")[-2000:] for ch in state["chapters"][-3:]
-                )
-                user_content += f"Existing recent context (last chapters excerpts):\n{context_snippets}\n\n"
-            user_content += CHAPTER_PROMPT.format(idx=idx+1, title=chapter_title)
-
-            messages = [
-                {"role": "system", "content": SYSTEM_PRIMER},
-                {"role": "user", "content": user_content}
-            ]
-
-            stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
-
-            chapter_chunks = []
-            for chunk in stream:
-                delta = chunk.choices[0].delta
-                if getattr(delta, "content", None):
-                    chapter_chunks.append(delta.content)
-
-            chapter_md = "".join(chapter_chunks).strip()
-            if not chapter_md.lstrip().startswith("##"):
-                chapter_md = f"## Chapter {idx+1}: {chapter_title}\n\n" + chapter_md
-
-            state["chapters"].append({"title": chapter_title, "content": chapter_md})
-            state["current_idx"] = idx + 1
-
-            save_novel_state(title, state, preview=True)
-            md_path = get_novel_md_path(title, preview=True)
-            md_path.write_text(build_book_markdown(state), encoding="utf-8")
-
-            progress_bar.progress((idx + 1) / total_chapters)
-            chapter_display.markdown(f"**Latest:** {chapter_title}")
-
-        st.success(f"🎉 Novel complete! {total_chapters} chapters written.")
-        st.balloons()
-
+        thread.start()
+        st.session_state.gen_thread = thread
     except Exception as e:
-        # Log full traceback server-side
-        logger.error(f"Error continuing novel: {e}", exc_info=True)
-        # Display user-friendly error message
-        st.error(f"❌ Error continuing novel: {str(e)}")
-        st.info("The error has been logged. Please check your API key and try again.")
+        logger.error(f"Failed to start generation thread: {e}", exc_info=True)
+        st.session_state.gen_status = "error"
+        st.session_state.gen_message = "Failed to start generation. Please try again."
+        st.session_state.gen_thread = None
+
+
+def generate_novel(title: str, concept: str, max_chapters: int, temperature: float) -> None:
+    """Generate a new novel from scratch (starts background thread)."""
+    state = init_novel_state(title, concept)
+    state["temperature"] = temperature
+    start_generation_thread(title, concept, max_chapters, temperature, is_new=True, state=state)
+
+def continue_novel(novel: Dict) -> None:
+    """Continue generating an incomplete novel (starts background thread)."""
+    state = novel["state"]
+    title = state["title"]
+    concept = state["concept"]
+    temperature = state["temperature"]
+    max_chapters = len(state["outline_items"])
+
+    if state["current_idx"] >= len(state["outline_items"]):
+        # Already complete, mark status accordingly
+        st.session_state.gen_status = "completed"
+        st.session_state.gen_message = "This novel is already complete!"
+        return
+
+    start_generation_thread(title, concept, max_chapters, temperature, is_new=False, state=state)
 
 def render_library_tab():
     """Render the library management tab."""
@@ -605,6 +719,9 @@ def render_novel_list(preview: bool):
 
             with col3:
                 if preview:
+                    # Check if generation is currently running
+                    is_running = is_generation_running()
+
                     if novel['chapters_written'] >= novel['total_chapters']:
                         if st.button("✅ Publish", key=f"publish_{novel['slug']}"):
                             with st.spinner("Publishing..."):
@@ -612,13 +729,10 @@ def render_novel_list(preview: bool):
                                     st.success("Published successfully!")
                                     st.rerun()
                     else:
-                        # Show Continue button for incomplete novels (progress bar shows status)
-                        if st.button("▶️ Continue", key=f"continue_{novel['slug']}"):
-                            st.session_state.generating = True
-                            st.session_state.gen_params = {
-                                "mode": "continue",
-                                "novel": novel
-                            }
+                        # Show Continue button for incomplete novels (disabled if generation is running)
+                        if st.button("▶️ Continue", key=f"continue_{novel['slug']}", disabled=is_running):
+                            # Start generation (reset_generation_state() called internally)
+                            continue_novel(novel)
                             st.rerun()
 
                 with st.popover("🗑️ Delete", use_container_width=True):
@@ -723,8 +837,74 @@ def render_reader():
                 st.session_state.selected_chapter = selected_chapter + 1
                 st.rerun()
 
+# Sidebar progress panel using fragment for auto-refresh
+@st.fragment(run_every=SIDEBAR_REFRESH_INTERVAL_SEC)
+def render_sidebar_progress() -> None:
+    """Auto-refreshing sidebar progress panel for generation status."""
+    gen_status = st.session_state.get("gen_status", "idle")
+
+    # Only show progress panel if there's active or recent generation
+    if gen_status == "idle":
+        return
+
+    st.markdown("### Generation Progress")
+
+    if is_generation_running():
+        # Active generation
+        title = st.session_state.get("gen_title", "Novel")
+        progress_pct = st.session_state.get("gen_progress_pct", 0)
+        current = st.session_state.get("gen_progress_current", 0)
+        total = st.session_state.get("gen_progress_total", 0)
+        message = st.session_state.get("gen_message", "Starting...")
+        last_chapter = st.session_state.get("gen_last_chapter", "")
+
+        st.markdown(f"**{title}**")
+        st.progress(progress_pct)
+        if total > 0:
+            st.caption(f"Chapter {current}/{total}")
+        if last_chapter:
+            st.caption(f"Latest: {last_chapter}")
+        st.info(message)
+        st.caption("New generation disabled while running.")
+
+    elif gen_status == "completed":
+        title = st.session_state.get("gen_title", "Novel")
+        message = st.session_state.get("gen_message", "Completed!")
+        st.markdown(f"**{title}**")
+        st.progress(1.0)
+        st.success(message)
+        if st.button("Clear Status", key="clear_gen_status_sidebar"):
+            st.session_state.gen_status = "idle"
+            st.rerun()
+
+    elif gen_status == "paused":
+        title = st.session_state.get("gen_title", "Novel")
+        message = st.session_state.get("gen_message", "Paused")
+        st.markdown(f"**{title}**")
+        progress_pct = st.session_state.get("gen_progress_pct", 0)
+        st.progress(progress_pct)
+        st.warning(message)
+        if st.button("Clear Status", key="clear_gen_status_sidebar_paused"):
+            st.session_state.gen_status = "idle"
+            st.rerun()
+
+    elif gen_status == "error":
+        title = st.session_state.get("gen_title", "Novel")
+        message = st.session_state.get("gen_message", "Error occurred")
+        st.markdown(f"**{title}**")
+        st.error(message)
+        if st.button("Clear Status", key="clear_gen_status_sidebar_error"):
+            st.session_state.gen_status = "idle"
+            st.rerun()
+
+    st.markdown("---")
+
+
 # Main app
 def main():
+    # Initialize generation session state
+    init_gen_session_state()
+
     # Sidebar
     with st.sidebar:
         st.markdown("# 📚 Kimi Book Writer")
@@ -739,6 +919,10 @@ def main():
             st.success("✅ API key loaded")
 
         st.markdown("---")
+
+        # Render progress panel (auto-refreshes every 1s when running)
+        render_sidebar_progress()
+
         st.markdown("### Stats")
         preview_novels, _ = list_novels(preview=True)
         published_novels, _ = list_novels(preview=False)
