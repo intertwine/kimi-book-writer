@@ -683,10 +683,13 @@ def continue_novel(novel: Dict) -> None:
     title = state["title"]
     concept = state["concept"]
     temperature = state["temperature"]
-    max_chapters = len(state["outline_items"])
 
-    if state["current_idx"] >= len(state["outline_items"]):
-        # Already complete, mark status accordingly
+    # Use existing outline length, or default to 30 if outline was never generated
+    # (e.g., paused during outline generation)
+    max_chapters = len(state["outline_items"]) if state.get("outline_items") else 30
+
+    # Only mark as complete if we have an outline AND all chapters are written
+    if state.get("outline_items") and state["current_idx"] >= len(state["outline_items"]):
         st.session_state.gen_status = "completed"
         st.session_state.gen_message = "This novel is already complete!"
         return
