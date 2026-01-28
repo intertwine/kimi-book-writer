@@ -215,7 +215,7 @@ def list_novels(preview: bool = True) -> List[Dict]:
     # Return novels and errors separately for contextual display
     return sorted(novels, key=lambda x: x["title"]), errors
 
-def init_novel_state(title: str, concept: str) -> Dict:
+def init_novel_state(title: str, concept: str, max_chapters: int = 30) -> Dict:
     """Initialize a new novel state."""
     return {
         "title": title,
@@ -223,6 +223,7 @@ def init_novel_state(title: str, concept: str) -> Dict:
         "model": env("KIMI_MODEL", "kimi-k2-thinking-turbo"),
         "temperature": float(env("KIMI_TEMPERATURE", "0.6")),
         "max_output_tokens": int(env("KIMI_MAX_OUTPUT_TOKENS", "4096")),
+        "max_chapters": max_chapters,
         "outline_text": None,
         "chapters": [],
         "outline_items": [],
@@ -478,8 +479,8 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Phase 1: Generate outline (only for new novels)
-        if is_new:
+        # Phase 1: Generate outline (for new novels OR novels paused during outline generation)
+        if is_new or not state.get("outline_items"):
             _update_gen_state(gen_message="Generating outline...")
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},
@@ -673,7 +674,7 @@ def start_generation_thread(title: str, concept: str, max_chapters: int, tempera
 
 def generate_novel(title: str, concept: str, max_chapters: int, temperature: float) -> None:
     """Generate a new novel from scratch (starts background thread)."""
-    state = init_novel_state(title, concept)
+    state = init_novel_state(title, concept, max_chapters)
     state["temperature"] = temperature
     start_generation_thread(title, concept, max_chapters, temperature, is_new=True, state=state)
 
@@ -683,10 +684,13 @@ def continue_novel(novel: Dict) -> None:
     title = state["title"]
     concept = state["concept"]
     temperature = state["temperature"]
-    max_chapters = len(state["outline_items"])
 
-    if state["current_idx"] >= len(state["outline_items"]):
-        # Already complete, mark status accordingly
+    # Use existing outline length, or stored max_chapters if outline was never generated
+    # (e.g., paused during outline generation). Fall back to 30 for legacy state files.
+    max_chapters = len(state["outline_items"]) if state.get("outline_items") else state.get("max_chapters", 30)
+
+    # Only mark as complete if we have an outline AND all chapters are written
+    if state.get("outline_items") and state["current_idx"] >= len(state["outline_items"]):
         st.session_state.gen_status = "completed"
         st.session_state.gen_message = "This novel is already complete!"
         return
