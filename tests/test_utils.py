@@ -61,3 +61,41 @@ Chapter Three
 
 def test_empty_input():
     assert extract_outline_items("") == []
+
+
+def test_extract_chapter_without_space():
+    """Test that 'ChapterN:' format (without space after 'Chapter') is recognized.
+
+    Regression test for GitHub issue #12: The regex pattern was using \\s+ (one or more
+    spaces) instead of \\s* (zero or more), causing lines like 'Chapter1:' to be dropped.
+    """
+    text = """
+1. Introduction
+Chapter 1: The Setup
+2. The Middle
+Chapter2: The Climax
+3. Conclusion
+"""
+    items = extract_outline_items(text)
+    # All 5 items should be extracted, including "The Climax" from "Chapter2:"
+    assert "Introduction" in items
+    assert "The Setup" in items
+    assert "The Middle" in items
+    assert "The Climax" in items
+    assert "Conclusion" in items
+    assert len(items) == 5
+
+
+def test_extract_chapter_various_no_space_formats():
+    """Test various 'ChapterN' formats without spaces."""
+    text = """
+Chapter1: First Chapter
+Chapter10: Tenth Chapter
+Chapter99 - Almost Done
+Chapter100: The End
+"""
+    items = extract_outline_items(text)
+    assert "First Chapter" in items
+    assert "Tenth Chapter" in items
+    assert "Almost Done" in items
+    assert "The End" in items

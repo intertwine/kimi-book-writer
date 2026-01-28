@@ -478,8 +478,8 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Phase 1: Generate outline (only for new novels)
-        if is_new:
+        # Phase 1: Generate outline (for new novels OR novels paused during outline generation)
+        if is_new or not state.get("outline_items"):
             _update_gen_state(gen_message="Generating outline...")
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},

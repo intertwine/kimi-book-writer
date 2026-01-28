@@ -11,8 +11,8 @@ def extract_outline_items(text: str):
         line=line.strip()
         if not line:
             continue
-        if re.match(r'^(\d+\.\s+|\-\s+|\*\s+|#{1,6}\s+|Chapter\s+\d+)', line, flags=re.I):
-            core = re.sub(r'^(\d+\.\s+|\-\s+|\*\s+|#{1,6}\s+|Chapter\s+\d+\s+)', '', line, flags=re.I).strip()
+        if re.match(r'^(\d+\.\s+|\-\s+|\*\s+|#{1,6}\s+|Chapter\s*\d+)', line, flags=re.I):
+            core = re.sub(r'^(\d+\.\s+|\-\s+|\*\s+|#{1,6}\s+|Chapter\s*\d+\s*)', '', line, flags=re.I).strip()
             core = re.sub(r'^(?:Chapter\s*\d+\s*[:\-–]\s*)', '', core, flags=re.I).strip()
             # Remove any leftover leading punctuation (colon, dash, etc.) after removing Chapter prefix
             core = re.sub(r'^[:\-–]\s*', '', core).strip()

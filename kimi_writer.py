@@ -143,13 +143,29 @@ def main():
     args = parser.parse_args()
 
     state_path = Path(RESUME_FILE)
-    state = load_or_init_state(state_path)
 
-    if not args.resume or not state.get("concept"):
+    if args.resume:
+        # Resume mode: load existing state
+        state = load_or_init_state(state_path)
+        if not state.get("concept"):
+            prompt = args.prompt or input("Enter your novel concept/prompt: ").strip()
+            state["concept"] = prompt
+            if args.title:
+                state["title"] = args.title
+    else:
+        # Fresh start: initialize new state, discard any existing state file
         prompt = args.prompt or input("Enter your novel concept/prompt: ").strip()
-        state["concept"] = prompt
-        if args.title:
-            state["title"] = args.title
+        state = {
+            "title": args.title if args.title else None,
+            "concept": prompt,
+            "model": env("KIMI_MODEL", "kimi-k2-thinking-turbo"),
+            "temperature": float(env("KIMI_TEMPERATURE", "0.6")),
+            "max_output_tokens": int(env("KIMI_MAX_OUTPUT_TOKENS", "4096")),
+            "outline_text": None,
+            "chapters": [],
+            "outline_items": [],
+            "current_idx": 0
+        }
 
     client = get_client()
     model = state["model"]
