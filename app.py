@@ -172,6 +172,18 @@ def get_novel_slug(title: str) -> str:
     slug = re.sub(r'[-\s]+', '-', slug)
     return slug.strip('-')
 
+
+def validate_path_within_directory(path: Path, allowed_dir: Path) -> Path:
+    """
+    Validate that a path resolves within an allowed directory.
+    Raises ValueError if path traversal is detected.
+    """
+    resolved = path.resolve()
+    allowed_resolved = allowed_dir.resolve()
+    if not str(resolved).startswith(str(allowed_resolved) + os.sep) and resolved != allowed_resolved:
+        raise ValueError(f"Path traversal detected: {path} resolves outside {allowed_dir}")
+    return resolved
+
 def strip_markdown_formatting(text: str) -> str:
     """Strip markdown bold (**text**) and italic (*text*) formatting from a string."""
     # First strip bold (double asterisks)
@@ -230,7 +242,7 @@ def get_novel_images_dir(title: str, preview: bool = True) -> Path:
     return base_dir / f"{slug}_images"
 
 
-def init_novel_state(title: str, concept: str, max_chapters: int = 30) -> Dict:
+def init_novel_state(title: str, concept: str, max_chapters: int = 30, flux_model: str = None) -> Dict:
     """Initialize a new novel state."""
     return {
         "title": title,
@@ -245,6 +257,7 @@ def init_novel_state(title: str, concept: str, max_chapters: int = 30) -> Dict:
         "outline_items": [],
         "current_idx": 0,
         "images_enabled": False,
+        "flux_model": flux_model,  # Persist for resume
         "cover_image_path": None,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat()
@@ -338,10 +351,20 @@ def publish_novel(title: str):
         return False
 
 def delete_novel(title: str, preview: bool = True):
-    """Delete a novel's files."""
+    """Delete a novel's files with path traversal protection."""
+    base_dir = PREVIEW_DIR if preview else PUBLISHED_DIR
     state_path = get_novel_state_path(title, preview)
     md_path = get_novel_md_path(title, preview)
     images_dir = get_novel_images_dir(title, preview)
+
+    # Validate all paths are within expected directory (defense in depth)
+    try:
+        validate_path_within_directory(state_path, base_dir)
+        validate_path_within_directory(md_path, base_dir)
+        validate_path_within_directory(images_dir, base_dir)
+    except ValueError as e:
+        logger.error(f"Path validation failed in delete_novel: {e}")
+        raise
 
     if state_path.exists():
         state_path.unlink()
@@ -782,7 +805,7 @@ def start_generation_thread(title: str, concept: str, max_chapters: int, tempera
 
 def generate_novel(title: str, concept: str, max_chapters: int, temperature: float, top_p: float = 0.95, images_enabled: bool = False, flux_model: str = None) -> None:
     """Generate a new novel from scratch (starts background thread)."""
-    state = init_novel_state(title, concept, max_chapters)
+    state = init_novel_state(title, concept, max_chapters, flux_model=flux_model)
     state["temperature"] = temperature
     state["top_p"] = top_p
     state["images_enabled"] = images_enabled
@@ -796,8 +819,8 @@ def continue_novel(novel: Dict) -> None:
     temperature = state["temperature"]
     top_p = state.get("top_p", 0.95)
     images_enabled = state.get("images_enabled", False)
-    # For continuing, use default flux model since we don't store it in state
-    flux_model = get_flux_model() if images_enabled else None
+    # Load flux_model from state if available, fallback to env default
+    flux_model = state.get("flux_model") or (get_flux_model() if images_enabled else None)
 
     # Use existing outline length, or stored max_chapters if outline was never generated
     # (e.g., paused during outline generation). Fall back to 30 for legacy state files.

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import List, Dict
@@ -36,6 +37,14 @@ from image_gen import (
 )
 
 console = Console()
+
+
+def get_novel_slug(title: str) -> str:
+    """Convert novel title to filesystem-safe slug."""
+    slug = re.sub(r'[^\w\s-]', '', title.lower())
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return slug.strip('-')
+
 
 SYSTEM_PRIMER = """You are Kimi, an AI novelist provided by Moonshot AI. 
 You write long-form, novel-length fiction in clear, publishable English (or the user's requested language).
@@ -153,10 +162,14 @@ def build_book_markdown(state: Dict, include_images: bool = True) -> str:
     title = state["title"] or "Untitled Novel"
     parts = [f"# {title}\n"]
 
+    # Derive images directory name from title (consistent with storage)
+    slug = get_novel_slug(title)
+    images_dir_name = f"{slug}_images"
+
     # Include cover image if available
     if include_images and state.get("cover_image_path"):
         cover_filename = Path(state["cover_image_path"]).name
-        parts.append(f"![Cover](images/{cover_filename})\n")
+        parts.append(f"![Cover]({images_dir_name}/{cover_filename})\n")
 
     if state.get("concept"):
         parts.append(f"*Generated from concept:* {state['concept']}\n")
@@ -167,7 +180,7 @@ def build_book_markdown(state: Dict, include_images: bool = True) -> str:
         # Add chapter image before content if available
         if include_images and ch.get("image_path"):
             img_filename = Path(ch["image_path"]).name
-            parts.append(f"![Chapter {i+1}](images/{img_filename})\n")
+            parts.append(f"![Chapter {i+1}]({images_dir_name}/{img_filename})\n")
         parts.append(ch["content"].strip() + "\n")
 
     return "\n".join(parts)
@@ -224,9 +237,10 @@ def main():
     state["images_enabled"] = images_enabled
 
     if images_enabled:
-        # Set up images directory next to output file
+        # Set up images directory using novel slug (consistent with web UI)
         out_path = Path(args.out)
-        images_dir = out_path.parent / "images"
+        slug = get_novel_slug(state["title"] or "novel")
+        images_dir = out_path.parent / f"{slug}_images"
         images_dir.mkdir(parents=True, exist_ok=True)
         console.print(f"[cyan]Image generation enabled. Images will be saved to {images_dir}[/cyan]")
 
