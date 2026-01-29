@@ -1,6 +1,7 @@
 # Kimi Book Writer Makefile
 # Use 'make help' to see available targets
 
+SHELL := /bin/bash
 .PHONY: help install test test-verbose web novel novel-images resume clean clean-preview
 
 # Colors for pretty output

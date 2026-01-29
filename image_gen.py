@@ -24,6 +24,7 @@ load_dotenv()
 # Constants
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_FLUX_MODEL = "black-forest-labs/flux.2-klein-4b"
+ALLOWED_IMAGE_EXTENSIONS = {"png", "jpeg", "jpg", "webp", "gif"}
 
 
 def is_image_generation_enabled() -> bool:
@@ -34,24 +35,6 @@ def is_image_generation_enabled() -> bool:
 def get_flux_model() -> str:
     """Get configured FLUX model or default."""
     return os.getenv("FLUX_MODEL", DEFAULT_FLUX_MODEL)
-
-
-def get_openrouter_client():
-    """Create OpenAI client configured for OpenRouter."""
-    from openai import OpenAI
-
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError("OPENROUTER_API_KEY not configured")
-
-    return OpenAI(
-        api_key=api_key,
-        base_url=OPENROUTER_BASE_URL,
-        default_headers={
-            "HTTP-Referer": "https://github.com/intertwine/kimi-book-writer",
-            "X-Title": "Kimi Book Writer"
-        }
-    )
 
 
 @retry(wait=wait_exponential(multiplier=2, min=2, max=60), stop=stop_after_attempt(3))
@@ -101,6 +84,19 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
 
         if response.status_code != 200:
             error_text = response.text[:500] if response.text else "No error message"
+            # Provide helpful guidance for common errors
+            if response.status_code == 401:
+                raise ValueError(
+                    "Invalid OPENROUTER_API_KEY. Check your API key at https://openrouter.ai/keys"
+                )
+            elif response.status_code == 429:
+                raise RuntimeError(
+                    "Rate limited by OpenRouter. Please wait and try again."
+                )
+            elif response.status_code == 402:
+                raise RuntimeError(
+                    "Insufficient credits on OpenRouter. Add credits at https://openrouter.ai/credits"
+                )
             raise RuntimeError(f"OpenRouter API error {response.status_code}: {error_text}")
 
         data = response.json()
@@ -149,10 +145,30 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
     if not data_url or not data_url.startswith("data:image"):
         raise RuntimeError(f"Invalid data URL: {data_url[:100] if data_url else 'None'}")
 
+    # Defensive parsing with validation
+    if "," not in data_url:
+        raise RuntimeError("Malformed data URL: missing comma separator")
+
     header, b64_data = data_url.split(",", 1)
-    mime_type = header.split(";")[0].split(":")[1]  # "image/png"
-    ext = mime_type.split("/")[1]  # "png"
-    image_bytes = base64.b64decode(b64_data)
+
+    # Extract MIME type with validation
+    if ":" not in header or "/" not in header:
+        raise RuntimeError(f"Malformed data URL header: {header[:50]}")
+
+    mime_part = header.split(";")[0]  # "data:image/png"
+    mime_type = mime_part.split(":")[1] if ":" in mime_part else "image/png"
+    ext = mime_type.split("/")[1] if "/" in mime_type else "png"
+
+    # Validate extension against allowlist
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        logger.warning(f"Unexpected image extension '{ext}', defaulting to 'png'")
+        ext = "png"
+
+    # Decode base64 with error handling
+    try:
+        image_bytes = base64.b64decode(b64_data)
+    except Exception as e:
+        raise RuntimeError(f"Failed to decode base64 image data: {e}")
 
     logger.info(f"Generated image: {len(image_bytes)} bytes, format: {ext}")
     return image_bytes, ext
