@@ -44,7 +44,7 @@ class TestGetFluxModel:
                 import importlib
                 import image_gen
                 importlib.reload(image_gen)
-                assert image_gen.get_flux_model() == "black-forest-labs/flux-1.1-pro"
+                assert image_gen.get_flux_model() == "black-forest-labs/flux.2-klein-4b"
 
     def test_returns_env_value_when_set(self):
         """Should return env value when FLUX_MODEL is set."""

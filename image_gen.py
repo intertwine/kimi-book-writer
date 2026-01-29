@@ -23,7 +23,7 @@ load_dotenv()
 
 # Constants
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_FLUX_MODEL = "black-forest-labs/flux-1.1-pro"
+DEFAULT_FLUX_MODEL = "black-forest-labs/flux.2-klein-4b"
 
 
 def is_image_generation_enabled() -> bool:
@@ -85,10 +85,11 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
         "X-Title": "Kimi Book Writer"
     }
 
+    # FLUX.2 models output image only, not image+text
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "modalities": ["image", "text"]
+        "modalities": ["image"]
     }
 
     with httpx.Client(timeout=120.0) as client:

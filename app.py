@@ -435,11 +435,11 @@ def render_generate_tab():
                     flux_model = st.selectbox(
                         "Image model",
                         options=[
-                            "black-forest-labs/flux-1.1-pro",
-                            "black-forest-labs/flux-1-schnell"
+                            "black-forest-labs/flux.2-klein-4b",
+                            "black-forest-labs/flux.2-max"
                         ],
-                        format_func=lambda x: "FLUX 1.1 Pro (Quality)" if "pro" in x else "FLUX Schnell (Fast)",
-                        help="Pro produces higher quality, Schnell is faster and cheaper"
+                        format_func=lambda x: "FLUX.2 Klein (Fast)" if "klein" in x else "FLUX.2 Max (Quality)",
+                        help="Klein is faster and cheaper, Max produces higher quality"
                     )
 
                 if st.button("Start Generation", use_container_width=True):
