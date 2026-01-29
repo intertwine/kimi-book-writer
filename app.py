@@ -29,7 +29,7 @@ from kimi_writer import (  # noqa: E402
     chat_complete_stream,
     build_book_markdown,
     SYSTEM_PRIMER,
-    OUTLINE_PROMPT,
+    get_outline_prompt,
     CHAPTER_PROMPT,
     env
 )
@@ -587,7 +587,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
             _update_gen_state(gen_message="Generating outline...")
             messages = [
                 {"role": "system", "content": SYSTEM_PRIMER},
-                {"role": "user", "content": f"{OUTLINE_PROMPT}\n\nConcept: {concept}"}
+                {"role": "user", "content": f"{get_outline_prompt(max_chapters)}\n\nConcept: {concept}"}
             ]
             stream = chat_complete_stream(client, model, messages, temperature, max_tokens, top_p)
 
