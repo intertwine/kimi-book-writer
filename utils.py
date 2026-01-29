@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import List
 
 # Constants for prompt truncation limits
 CONCEPT_EXCERPT_MAX_CHARS = 800
@@ -34,8 +35,8 @@ def validate_image_path(path_str: str, allowed_dir: Path) -> bool:
         path = Path(path_str)
         resolved = path.resolve()
         allowed_resolved = allowed_dir.resolve()
-        # Check path is within allowed directory
-        if not str(resolved).startswith(str(allowed_resolved) + os.sep):
+        # Check path is within allowed directory (or is the directory itself)
+        if not (resolved == allowed_resolved or str(resolved).startswith(str(allowed_resolved) + os.sep)):
             return False
         # Check extension is valid image type
         valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
@@ -64,7 +65,7 @@ def validate_flux_model(model: str) -> str:
     )
 
 
-def extract_outline_items(text: str):
+def extract_outline_items(text: str) -> List[str]:
     """
     Extract chapter titles from a model-generated outline.
     Accepts numbered lists, markdown headings, or bullet lists.

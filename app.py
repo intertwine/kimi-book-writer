@@ -571,7 +571,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Set up images directory if enabled (with race condition handling)
+        # Set up images directory if enabled (with error handling)
         images_dir = None
         if images_enabled:
             images_dir = get_novel_images_dir(title, preview=True)

@@ -29,6 +29,7 @@ from openai import OpenAI
 from utils import (
     extract_outline_items,
     get_novel_slug,
+    validate_flux_model,
     CONCEPT_EXCERPT_MAX_CHARS,
     CHAPTER_EXCERPT_MAX_CHARS,
 )
@@ -50,7 +51,7 @@ Avoid explicit sexual content, racism, terrorism, or graphic violence.
 The string 'Moonshot AI' must remain in English if mentioned.
 """
 
-def get_outline_prompt(max_chapters: int = None) -> str:
+def get_outline_prompt(max_chapters: int | None = None) -> str:
     """Generate the outline prompt, optionally limiting chapter count."""
     if max_chapters and max_chapters < 20:
         chapter_range = f"exactly {max_chapters} chapters"
@@ -224,7 +225,7 @@ def main():
         images_enabled = False
     elif args.images:
         if not is_image_generation_enabled():
-            console.print("[yellow]Warning: --images specified but OPENROUTER_API_KEY not set. Images disabled.[/yellow]")
+            console.print("[yellow]Warning: --images specified but OPENROUTER_API_KEY not set. Get your key at https://openrouter.ai/keys[/yellow]")
         else:
             images_enabled = True
     elif is_image_generation_enabled():
@@ -235,6 +236,13 @@ def main():
     # Use flux_model from args, state, or default
     if not flux_model:
         flux_model = state.get("flux_model") or get_flux_model()
+    # Validate flux_model if images are enabled
+    if images_enabled and flux_model:
+        try:
+            flux_model = validate_flux_model(flux_model)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
     state["flux_model"] = flux_model
 
     if images_enabled:
