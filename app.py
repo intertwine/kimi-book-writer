@@ -1094,10 +1094,20 @@ def render_sidebar_progress() -> None:
             st.caption(f"Latest: {last_chapter}")
         st.info(message)
         st.caption("New generation disabled while running.")
+        # Mark that we were running (to detect transition to completed)
+        st.session_state._was_running = True
 
     elif gen_status == "completed":
         title = st.session_state.get("gen_title", "Novel")
         message = st.session_state.get("gen_message", "Completed!")
+
+        # Detect first-time completion (was running, now completed)
+        # Trigger full page rerun to update main panel and show toast
+        if st.session_state.get("_was_running", False):
+            st.session_state._was_running = False
+            st.session_state._show_completion_toast = True
+            st.rerun()  # Full page rerun to refresh main panel
+
         st.markdown(f"**{title}**")
         st.progress(1.0)
         st.success(message)
@@ -1132,6 +1142,13 @@ def render_sidebar_progress() -> None:
 def main():
     # Initialize generation session state
     init_gen_session_state()
+
+    # Show completion toast if generation just finished
+    if st.session_state.pop("_show_completion_toast", False):
+        title = st.session_state.get("gen_title", "Novel")
+        st.toast(f"✨ '{title}' is complete! Check the Library to read or publish.", icon="🎉")
+        # Reset status to idle so form is usable again
+        st.session_state.gen_status = "idle"
 
     # Sidebar
     with st.sidebar:
