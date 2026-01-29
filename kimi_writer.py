@@ -35,11 +35,9 @@ from utils import (
 )
 from image_gen import (
     is_image_generation_enabled,
-    generate_image,
-    generate_cover_prompt,
-    generate_chapter_prompt,
-    save_image,
+    get_flux_model,
 )
+from async_image_gen import ImageGenerationQueue
 
 console = Console()
 
@@ -183,6 +181,32 @@ def build_book_markdown(state: Dict, include_images: bool = True) -> str:
 
     return "\n".join(parts)
 
+
+def _process_completed_image(task_result, state: Dict, console) -> None:
+    """Process a completed image task and update state."""
+    from async_image_gen import ImageTask
+
+    if task_result.image_path:
+        if task_result.task_type == "cover":
+            state["cover_image_path"] = task_result.image_path
+            console.print(f"[green]Cover image saved: {task_result.image_path}[/green]")
+        else:
+            # Chapter image - find and update the chapter
+            chapter_idx = task_result.chapter_idx
+            if chapter_idx is not None and chapter_idx < len(state["chapters"]):
+                state["chapters"][chapter_idx]["image_path"] = task_result.image_path
+                console.print(f"[green]Chapter {chapter_idx + 1} image saved[/green]")
+    elif task_result.error:
+        console.print(f"[yellow]Failed to generate {task_result.task_type} image: {task_result.error}[/yellow]")
+        # Track failed image for debugging
+        if "failed_images" not in state:
+            state["failed_images"] = []
+        failed_entry = {"type": task_result.task_type, "error": task_result.error}
+        if task_result.chapter_idx is not None:
+            failed_entry["chapter_idx"] = task_result.chapter_idx + 1
+        state["failed_images"].append(failed_entry)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a novel-length Markdown book with Kimi K2.5.")
     parser.add_argument("--prompt", "-p", help="Concept prompt for the novel (if omitted, you will be asked)")
@@ -260,6 +284,11 @@ def main():
         else:
             console.print(f"[cyan]Image generation enabled. Images will be saved to {images_dir}[/cyan]")
 
+    # Initialize async image queue if images enabled
+    image_queue = None
+    if images_enabled and images_dir:
+        image_queue = ImageGenerationQueue(images_dir, flux_model, max_workers=2)
+
     # Outline phase
     if not state["outline_text"]:
         console.rule("[bold]Generating outline[/bold]")
@@ -281,24 +310,10 @@ def main():
         state["title"] = "A Novel Generated with Kimi K2.5"
         save_state(state_path, state)
 
-    # Generate cover image (if enabled and not already generated)
-    if images_enabled and not state.get("cover_image_path"):
-        console.rule("[bold]Generating cover image[/bold]")
-        try:
-            cover_prompt = generate_cover_prompt(state["title"], state["concept"])
-            image_bytes, ext = generate_image(cover_prompt, flux_model)
-            cover_path = images_dir / f"cover.{ext}"
-            save_image(image_bytes, cover_path)
-            state["cover_image_path"] = str(cover_path)
-            save_state(state_path, state)
-            console.print(f"[green]Cover image saved to {cover_path}[/green]")
-        except Exception as e:
-            console.print(f"[yellow]Failed to generate cover image: {e}[/yellow]")
-            # Track failed image for debugging
-            if "failed_images" not in state:
-                state["failed_images"] = []
-            state["failed_images"].append({"type": "cover", "error": str(e)})
-            save_state(state_path, state)
+    # Submit cover image generation (async, non-blocking)
+    if image_queue and not state.get("cover_image_path"):
+        console.print("[cyan]Submitting cover image generation (async)...[/cyan]")
+        image_queue.submit_cover(state["title"], state["concept"])
 
     # Chapter phase
     console.rule("[bold]Writing chapters[/bold]")
@@ -337,34 +352,34 @@ def main():
 
             chapter_data = {"title": title, "content": chapter_md}
 
-            # Generate chapter image
-            if images_enabled:
-                try:
-                    chapter_prompt = generate_chapter_prompt(
-                        state["title"],
-                        title,
-                        chapter_md[:600]  # Use beginning of chapter as context
-                    )
-                    image_bytes, ext = generate_image(chapter_prompt, flux_model)
-                    chapter_image_path = images_dir / f"chapter_{idx+1:02d}.{ext}"
-                    save_image(image_bytes, chapter_image_path)
-                    chapter_data["image_path"] = str(chapter_image_path)
-                    console.print(f"[green]Chapter {idx+1} image saved[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Failed to generate chapter {idx+1} image: {e}[/yellow]")
-                    # Track failed image for debugging
-                    if "failed_images" not in state:
-                        state["failed_images"] = []
-                    state["failed_images"].append({
-                        "type": "chapter",
-                        "chapter_idx": idx + 1,
-                        "error": str(e)
-                    })
+            # Submit chapter image generation (async, non-blocking)
+            if image_queue:
+                image_queue.submit_chapter(
+                    idx,
+                    state["title"],
+                    title,
+                    chapter_md[:600]  # Use beginning of chapter as context
+                )
 
             state["chapters"].append(chapter_data)
             state["current_idx"] = idx + 1
             save_state(state_path, state)
             progress.advance(task)
+
+            # Collect any completed images (non-blocking)
+            if image_queue:
+                for task_result in image_queue.collect_completed():
+                    _process_completed_image(task_result, state, console)
+
+    # Wait for all remaining images to complete
+    if image_queue:
+        pending = image_queue.pending_count()
+        if pending > 0:
+            console.rule(f"[bold]Waiting for {pending} image(s) to complete[/bold]")
+        for task_result in image_queue.wait_all():
+            _process_completed_image(task_result, state, console)
+        image_queue.shutdown()
+        save_state(state_path, state)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

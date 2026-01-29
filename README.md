@@ -1,8 +1,8 @@
-# Kimi K2 Novelist
+# Kimi K2.5 Novelist
 
-Generate novel-length Markdown books using **Moonshot AI's Kimi K2 reasoning models** (256k context, multi-step reasoning).
+Generate novel-length Markdown books using **Moonshot AI's Kimi K2.5 reasoning models** (262k context, 1T parameters).
 
-✨ **New**: Web UI for generating, managing, and reading novels!
+✨ **New**: FLUX.2 image generation for cover and chapter illustrations!
 🚀 **One-click launch** in GitHub Codespaces!
 
 **Two ways to use:**
@@ -10,12 +10,20 @@ Generate novel-length Markdown books using **Moonshot AI's Kimi K2 reasoning mod
 - 🖥️ **Web UI** - Streamlit-based interface for easy novel generation and management
 - 💻 **CLI** - Command-line interface for automated workflows
 
-**API essentials straight from the docs on this page:**
+**Features:**
+
+- 📖 **Novel generation** with Kimi K2.5 (262k context, multi-step reasoning)
+- 🎨 **Optional illustrations** via FLUX.2 models on OpenRouter (cover + chapter images)
+- ⚡ **Async image generation** - images generate concurrently with text, not blocking
+- ⏸️ **Pause/Resume** - stop anytime and continue later
+- 📊 **Live progress** - real-time updates during generation
+
+**API essentials:**
 
 - Base URL: `https://api.moonshot.ai/v1`
 - Install OpenAI SDK `>=1.x`
-- Recommended K2 models: `kimi-k2-thinking`, `kimi-k2-thinking-turbo` (long-thinking, 256k; turbo is faster).
-- K2 is text-only; use _Kimi Latest_ for images.
+- Recommended model: `kimi-k2.5` (262k context, 1T parameters)
+- Image generation: FLUX.2 via OpenRouter (optional)
 
 ---
 
@@ -52,11 +60,12 @@ The easiest way to get started is using GitHub Codespaces:
 **Web UI Features:**
 
 - 📝 **Generate** - Create new novels with a user-friendly form
+- 🎨 **Illustrations** - Optional FLUX.2 cover and chapter images (async generation)
 - ⏸️ **Pause/Resume** - Stop generation anytime and continue later
 - 📊 **Live Progress** - Real-time sidebar progress panel with chapter-by-chapter updates
 - 🔄 **Background Generation** - Non-blocking UI; generation runs in background thread
 - 📚 **Library** - Manage preview and published novels
-- 📖 **Reader** - Read novels with chapter navigation
+- 📖 **Reader** - Read novels with chapter navigation and images
 - ✅ **Publish** - Move novels from preview to published (auto-commits to repo)
 - ⬇️ **Download** - Export novels as Markdown files
 
@@ -92,37 +101,56 @@ cp .env.example .env
 Optional `.env` overrides:
 
 ```env
-KIMI_MODEL=kimi-k2-thinking-turbo
-KIMI_TEMPERATURE=0.6
-KIMI_MAX_OUTPUT_TOKENS=4096
+# Text generation (Moonshot)
+KIMI_MODEL=kimi-k2.5
+KIMI_TEMPERATURE=1.0
+KIMI_TOP_P=0.95
+KIMI_MAX_OUTPUT_TOKENS=8192
+
+# Image generation (OpenRouter) - optional
+OPENROUTER_API_KEY=sk-or-v1-...
+FLUX_MODEL=black-forest-labs/flux.2-klein-4b  # or flux.2-max for higher quality
+IMAGE_GENERATION_TIMEOUT=180  # seconds, increase for slower models
 ```
 
 #### 3) Generate a book
 
-Interactive:
+**Using Make targets (recommended):**
 
 ```bash
-python kimi_writer.py
-# Or with uv: uv run kimi_writer.py
+make help          # See all available commands
+make web           # Launch Streamlit web UI
+make novel         # Interactive CLI (text only)
+make novel-images  # Interactive CLI with illustrations
+make resume        # Continue from saved state
+make clean         # Remove CLI artifacts
 ```
 
-Non-interactive:
+**Direct CLI usage:**
 
 ```bash
-python kimi_writer.py --prompt "A near-future techno-thriller about..." --title "Ghosts in the Wire" --out book.md
+python kimi_writer.py                                    # Interactive
+python kimi_writer.py --prompt "..." --title "..." --out book.md  # Non-interactive
+python kimi_writer.py --images                           # Enable image generation
+python kimi_writer.py --no-images                        # Disable images (faster)
+python kimi_writer.py --flux-model black-forest-labs/flux.2-max  # Use specific FLUX model
 ```
 
-Useful flags:
+**CLI flags:**
 
 - `--resume` Continue from `novel_state.json`
-- `--chapters N` Limit number of chapters to write:
-  - **Without `--resume`**: Write up to N chapters total (e.g., `--chapters 3` writes chapters 1-3)
-  - **With `--resume`**: Write N _more_ chapters from current progress (e.g., if 5 chapters exist, `--resume --chapters 3` writes chapters 6-8)
+- `--chapters N` Limit chapters:
+  - **Without `--resume`**: Write up to N chapters total
+  - **With `--resume`**: Write N _more_ chapters from current progress
+- `--images` Enable FLUX.2 image generation (requires `OPENROUTER_API_KEY`)
+- `--no-images` Disable image generation
+- `--flux-model MODEL` Specify FLUX model (`flux.2-klein-4b` or `flux.2-max`)
 
-Artifacts:
+**Artifacts:**
 
-- `novel.md` - full Markdown output (title, outline, chapters) — customizable via `--out`
+- `novel.md` - full Markdown output (title, outline, chapters, images) — customizable via `--out`
 - `novel_state.json` - checkpoint/resume state for the CLI
+- `<slug>_images/` - generated cover and chapter images (if enabled)
 
 ---
 
@@ -130,10 +158,15 @@ Artifacts:
 
 ### Novel Generation Process
 
-1. **Outline phase.** Asks K2 to create a 20-40 chapter outline as a numbered Markdown list.
-2. **Chapter phase.** Iterates over chapter titles, requesting ~1.5-2.5k-word chapters.
+1. **Outline phase.** Asks K2.5 to create a 20-40 chapter outline as a numbered Markdown list.
+2. **Cover image** (if enabled). Submits cover image generation to async queue.
+3. **Chapter phase.** Iterates over chapter titles, requesting ~1.5-2.5k-word chapters.
    A short rolling context (last few chapter snippets) is sent to preserve continuity without exhausting context.
-3. **Streaming + retries.** Output streams to console (dots), with exponential backoff for robustness.
+4. **Chapter images** (if enabled). Each chapter image is submitted to async queue after text completes.
+5. **Image completion.** At end, waits for all pending images to finish.
+6. **Streaming + retries.** Output streams to console (dots), with exponential backoff for robustness.
+
+**Async Image Generation:** Images generate concurrently with text (up to 2 simultaneous image requests). This means chapter writing isn't blocked waiting for images, significantly reducing total generation time when images are enabled.
 
 ### Web UI Workflow
 
@@ -160,13 +193,12 @@ Artifacts:
    - Previous/Next chapter buttons
    - Full markdown rendering
 
-### Why K2 _thinking/turbo_?
+### Why Kimi K2.5?
 
-From the quickstart:
-
-- **256K context** for long projects.
-- **Multi-step reasoning/tool use** for complex tasks.
-- Turbo variants can reach **60-100 tok/s**.
+- **262K context** for long novel projects
+- **1T parameters** with multi-step reasoning
+- **Optimized temperature=1.0** for creative writing
+- High throughput for chapter generation
 
 ## Project Structure
 
@@ -174,13 +206,18 @@ From the quickstart:
 kimi-book-writer/
 ├── app.py                 # Streamlit web UI (background thread generation)
 ├── kimi_writer.py         # CLI novel generator
-├── utils.py               # Shared utilities (outline parsing)
+├── utils.py               # Shared utilities (outline parsing, validation)
+├── image_gen.py           # FLUX.2 image generation via OpenRouter
+├── async_image_gen.py     # Async image queue with ThreadPoolExecutor
+├── Makefile               # Make targets for common operations
 ├── run-ui.sh              # Helper script to launch web UI
 ├── tests/                 # pytest test suite
 │   ├── conftest.py        # Test fixtures
 │   ├── test_kimi_writer.py
+│   ├── test_image_gen.py
 │   └── test_utils.py
 ├── preview/               # Draft novels (gitignored)
+│   └── <slug>_images/     # Generated images per novel
 ├── published/             # Published novels (committed)
 ├── examples/              # Example generated novels
 ├── .devcontainer/         # Codespaces configuration
@@ -197,7 +234,9 @@ kimi-book-writer/
 - The Web UI runs generation in a background thread, so the UI remains responsive
 - Progress is saved after each chapter, enabling safe pause/resume
 - Requires **Streamlit 1.37.0+** for the `@st.fragment(run_every=...)` auto-refresh feature
-- Supports **Kimi K2 thinking models** which return content via `delta.thinking` streaming
+- Supports **Kimi K2.5** which returns content via `delta.thinking` and `delta.content` streaming
+- Image generation is **async** - images generate concurrently with text (2 workers)
+- Images are optional; generation works without `OPENROUTER_API_KEY`
 - CLI is useful for automation, scripting, and headless server workflows
 
 ## Testing

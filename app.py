@@ -43,12 +43,9 @@ from utils import (  # noqa: E402
 )
 from image_gen import (  # noqa: E402
     is_image_generation_enabled,
-    generate_image,
-    generate_cover_prompt,
-    generate_chapter_prompt,
-    save_image,
     get_flux_model,
 )
+from async_image_gen import ImageGenerationQueue  # noqa: E402
 
 # Configure logging for server-side error tracking
 logging.basicConfig(level=logging.ERROR)
@@ -560,6 +557,29 @@ def _update_gen_state(**kwargs) -> None:
         st.session_state.update(kwargs)
 
 
+def _process_completed_image(task_result, state: Dict, title: str) -> None:
+    """Process a completed image task and update state."""
+    if task_result.image_path:
+        if task_result.task_type == "cover":
+            state["cover_image_path"] = task_result.image_path
+            logger.info(f"Cover image saved: {task_result.image_path}")
+        else:
+            # Chapter image - find and update the chapter
+            chapter_idx = task_result.chapter_idx
+            if chapter_idx is not None and chapter_idx < len(state["chapters"]):
+                state["chapters"][chapter_idx]["image_path"] = task_result.image_path
+                logger.info(f"Chapter {chapter_idx + 1} image saved")
+    elif task_result.error:
+        logger.warning(f"Failed to generate {task_result.task_type} image: {task_result.error}")
+        # Track failed image for debugging
+        if "failed_images" not in state:
+            state["failed_images"] = []
+        failed_entry = {"type": task_result.task_type, "error": task_result.error}
+        if task_result.chapter_idx is not None:
+            failed_entry["chapter_idx"] = task_result.chapter_idx + 1
+        state["failed_images"].append(failed_entry)
+
+
 def _generation_worker(title: str, concept: str, max_chapters: int, temperature: float, top_p: float, images_enabled: bool, flux_model: str, is_new: bool, state: Dict) -> None:
     """
     Background worker for novel generation.
@@ -571,12 +591,14 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Set up images directory if enabled (with error handling)
+        # Set up images directory and async queue if enabled (with error handling)
         images_dir = None
+        image_queue = None
         if images_enabled:
             images_dir = get_novel_images_dir(title, preview=True)
             try:
                 images_dir.mkdir(parents=True, exist_ok=True)
+                image_queue = ImageGenerationQueue(images_dir, flux_model, max_workers=2)
             except OSError as e:
                 logger.warning(f"Failed to create images directory {images_dir}: {e}")
                 images_dir = None
@@ -641,24 +663,10 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             _update_gen_state(gen_message=f"Outline created with {len(state['outline_items'])} chapters")
 
-        # Generate cover image (if enabled and not already generated)
-        if images_enabled and not state.get("cover_image_path"):
-            _update_gen_state(gen_message="Generating cover image...")
-            try:
-                cover_prompt = generate_cover_prompt(state["title"], concept)
-                image_bytes, ext = generate_image(cover_prompt, flux_model)
-                cover_path = images_dir / f"cover.{ext}"
-                save_image(image_bytes, cover_path)
-                state["cover_image_path"] = str(cover_path)
-                save_novel_state(title, state, preview=True)
-                logger.info(f"Cover image saved to {cover_path}")
-            except Exception as e:
-                logger.warning(f"Failed to generate cover image: {e}")
-                # Track failure in state for debugging
-                if "failed_images" not in state:
-                    state["failed_images"] = []
-                state["failed_images"].append({"type": "cover", "error": str(e)})
-                save_novel_state(title, state, preview=True)
+        # Submit cover image generation (async, non-blocking)
+        if image_queue and not state.get("cover_image_path"):
+            logger.info("Submitting cover image generation (async)")
+            image_queue.submit_cover(state["title"], concept)
 
         # Phase 2: Generate chapters
         total_chapters = len(state["outline_items"])
@@ -723,31 +731,37 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             chapter_data = {"title": chapter_title, "content": chapter_md}
 
-            # Generate chapter image
-            if images_enabled and images_dir:
-                _update_gen_state(gen_message=f"Generating image for Chapter {idx + 1}...")
-                try:
-                    chapter_prompt = generate_chapter_prompt(
-                        state["title"],
-                        chapter_title,
-                        chapter_md[:600]  # Use beginning of chapter as context
-                    )
-                    image_bytes, ext = generate_image(chapter_prompt, flux_model)
-                    chapter_image_path = images_dir / f"chapter_{idx+1:02d}.{ext}"
-                    save_image(image_bytes, chapter_image_path)
-                    chapter_data["image_path"] = str(chapter_image_path)
-                    logger.info(f"Chapter {idx+1} image saved")
-                except Exception as e:
-                    logger.warning(f"Failed to generate chapter {idx+1} image: {e}")
-                    # Track failure in state for debugging
-                    if "failed_images" not in state:
-                        state["failed_images"] = []
-                    state["failed_images"].append({"type": f"chapter_{idx+1}", "error": str(e)})
+            # Submit chapter image generation (async, non-blocking)
+            if image_queue:
+                image_queue.submit_chapter(
+                    idx,
+                    state["title"],
+                    chapter_title,
+                    chapter_md[:600]  # Use beginning of chapter as context
+                )
 
             state["chapters"].append(chapter_data)
             state["current_idx"] = idx + 1
 
+            # Collect any completed images (non-blocking)
+            if image_queue:
+                for task_result in image_queue.collect_completed():
+                    _process_completed_image(task_result, state, title)
+
             # Save state and markdown
+            save_novel_state(title, state, preview=True)
+            md_path = get_novel_md_path(title, preview=True)
+            md_path.write_text(build_book_markdown(state), encoding="utf-8")
+
+        # Wait for all remaining images to complete
+        if image_queue:
+            pending = image_queue.pending_count()
+            if pending > 0:
+                _update_gen_state(gen_message=f"Waiting for {pending} image(s) to complete...")
+            for task_result in image_queue.wait_all():
+                _process_completed_image(task_result, state, title)
+            image_queue.shutdown()
+            # Final save with all images
             save_novel_state(title, state, preview=True)
             md_path = get_novel_md_path(title, preview=True)
             md_path.write_text(build_book_markdown(state), encoding="utf-8")
@@ -762,6 +776,13 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
     except Exception as e:
         logger.error(f"Error during novel generation: {e}", exc_info=True)
+
+        # Cleanup image queue on error
+        if image_queue:
+            try:
+                image_queue.shutdown(wait=False)
+            except Exception:
+                pass
 
         # User-friendly error messages
         error_msg = str(e).lower()

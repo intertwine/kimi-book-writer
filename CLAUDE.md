@@ -39,9 +39,10 @@ uv run pytest -k test_name       # run specific test
 - `kimi_writer.py` - CLI with argparse, handles outline generation and chapter writing
 
 **Shared Code:**
-- `utils.py` - `extract_outline_items()` parses LLM-generated outlines into chapter lists
-- `image_gen.py` - FLUX.2 image generation via OpenRouter API
-- Both entry points use the same prompts (`SYSTEM_PRIMER`, `OUTLINE_PROMPT`, `CHAPTER_PROMPT`) and generation logic
+- `utils.py` - `extract_outline_items()` parses LLM-generated outlines into chapter lists, plus validation helpers
+- `image_gen.py` - FLUX.2 image generation via OpenRouter API (synchronous)
+- `async_image_gen.py` - `ImageGenerationQueue` for concurrent image generation with ThreadPoolExecutor
+- Both entry points use the same prompts (`SYSTEM_PRIMER`, `get_outline_prompt()`, `CHAPTER_PROMPT`) and generation logic
 
 **State Management:**
 - Novel state stored as JSON with: title, concept, model params, outline_text, outline_items (parsed chapters), chapters (written content), current_idx, images_enabled, cover_image_path
@@ -51,10 +52,16 @@ uv run pytest -k test_name       # run specific test
 
 **Generation Flow:**
 1. Outline phase: Send concept to LLM, parse response into chapter titles via `extract_outline_items()`
-2. Cover image: If images enabled, generate cover image via FLUX.2
+2. Cover image: If images enabled, submit cover to async image queue (non-blocking)
 3. Chapter phase: Iterate outline items, include rolling context (last 3 chapters, 2000 chars each) for continuity
-4. Chapter images: If images enabled, generate chapter illustration after each chapter
-5. Streaming with exponential backoff retries via tenacity
+4. Chapter images: If images enabled, submit chapter image to async queue after each chapter text completes
+5. Async collection: Completed images are collected periodically and at end (wait_all)
+6. Streaming with exponential backoff retries via tenacity
+
+**Async Image Architecture:**
+- `ImageGenerationQueue` uses `ThreadPoolExecutor` with 2 workers for concurrent image generation
+- Images generate in background while text generation continues
+- Queue methods: `submit_cover()`, `submit_chapter()`, `collect_completed()`, `wait_all()`, `shutdown()`
 
 **Directories:**
 - `preview/` - Draft novels (gitignored)
