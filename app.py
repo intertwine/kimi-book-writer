@@ -33,7 +33,22 @@ from kimi_writer import (  # noqa: E402
     CHAPTER_PROMPT,
     env
 )
-from utils import extract_outline_items  # noqa: E402
+from utils import (  # noqa: E402
+    extract_outline_items,
+    get_novel_slug,
+    validate_image_path,
+    validate_flux_model,
+    CONCEPT_EXCERPT_MAX_CHARS,
+    CHAPTER_EXCERPT_MAX_CHARS,
+)
+from image_gen import (  # noqa: E402
+    is_image_generation_enabled,
+    generate_image,
+    generate_cover_prompt,
+    generate_chapter_prompt,
+    save_image,
+    get_flux_model,
+)
 
 # Configure logging for server-side error tracking
 logging.basicConfig(level=logging.ERROR)
@@ -158,11 +173,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Utility functions
-def get_novel_slug(title: str) -> str:
-    """Convert novel title to filesystem-safe slug."""
-    slug = re.sub(r'[^\w\s-]', '', title.lower())
-    slug = re.sub(r'[-\s]+', '-', slug)
-    return slug.strip('-')
+def validate_path_within_directory(path: Path, allowed_dir: Path) -> Path:
+    """
+    Validate that a path resolves within an allowed directory.
+    Raises ValueError if path traversal is detected.
+    """
+    resolved = path.resolve()
+    allowed_resolved = allowed_dir.resolve()
+    if not str(resolved).startswith(str(allowed_resolved) + os.sep) and resolved != allowed_resolved:
+        raise ValueError(f"Path traversal detected: {path} resolves outside {allowed_dir}")
+    return resolved
 
 def strip_markdown_formatting(text: str) -> str:
     """Strip markdown bold (**text**) and italic (*text*) formatting from a string."""
@@ -215,19 +235,30 @@ def list_novels(preview: bool = True) -> List[Dict]:
     # Return novels and errors separately for contextual display
     return sorted(novels, key=lambda x: x["title"]), errors
 
-def init_novel_state(title: str, concept: str, max_chapters: int = 30) -> Dict:
+def get_novel_images_dir(title: str, preview: bool = True) -> Path:
+    """Get the images directory for a novel."""
+    slug = get_novel_slug(title)
+    base_dir = PREVIEW_DIR if preview else PUBLISHED_DIR
+    return base_dir / f"{slug}_images"
+
+
+def init_novel_state(title: str, concept: str, max_chapters: int = 30, flux_model: str = None) -> Dict:
     """Initialize a new novel state."""
     return {
         "title": title,
         "concept": concept,
-        "model": env("KIMI_MODEL", "kimi-k2-thinking-turbo"),
-        "temperature": float(env("KIMI_TEMPERATURE", "0.6")),
-        "max_output_tokens": int(env("KIMI_MAX_OUTPUT_TOKENS", "4096")),
+        "model": env("KIMI_MODEL", "kimi-k2.5"),
+        "temperature": float(env("KIMI_TEMPERATURE", "1.0")),
+        "top_p": float(env("KIMI_TOP_P", "0.95")),
+        "max_output_tokens": int(env("KIMI_MAX_OUTPUT_TOKENS", "8192")),
         "max_chapters": max_chapters,
         "outline_text": None,
         "chapters": [],
         "outline_items": [],
         "current_idx": 0,
+        "images_enabled": False,
+        "flux_model": flux_model,  # Persist for resume
+        "cover_image_path": None,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat()
     }
@@ -245,8 +276,10 @@ def publish_novel(title: str):
     # Copy files
     preview_state = PREVIEW_DIR / f"{slug}_state.json"
     preview_md = PREVIEW_DIR / f"{slug}.md"
+    preview_images = PREVIEW_DIR / f"{slug}_images"
     published_state = PUBLISHED_DIR / f"{slug}_state.json"
     published_md = PUBLISHED_DIR / f"{slug}.md"
+    published_images = PUBLISHED_DIR / f"{slug}_images"
 
     if not preview_state.exists() or not preview_md.exists():
         raise FileNotFoundError("Preview files not found")
@@ -254,11 +287,20 @@ def publish_novel(title: str):
     shutil.copy2(preview_state, published_state)
     shutil.copy2(preview_md, published_md)
 
+    # Copy images directory if it exists
+    if preview_images.exists():
+        if published_images.exists():
+            shutil.rmtree(published_images)
+        shutil.copytree(preview_images, published_images)
+
     # Git commit
     try:
-        # Add files to staging
+        # Add files to staging (including images if present)
+        files_to_add = [str(published_md), str(published_state)]
+        if published_images.exists():
+            files_to_add.append(str(published_images))
         subprocess.run(
-            ["git", "add", str(published_md), str(published_state)],
+            ["git", "add"] + files_to_add,
             check=True,
             capture_output=True,
             text=True
@@ -289,6 +331,8 @@ def publish_novel(title: str):
                 preview_state.unlink()
             if preview_md.exists():
                 preview_md.unlink()
+            if preview_images.exists():
+                shutil.rmtree(preview_images)
             logger.info(f"Cleaned up preview files for '{title}'")
         except OSError as e:
             logger.warning(f"Could not delete preview files for '{title}': {e}")
@@ -307,14 +351,27 @@ def publish_novel(title: str):
         return False
 
 def delete_novel(title: str, preview: bool = True):
-    """Delete a novel's files."""
+    """Delete a novel's files with path traversal protection."""
+    base_dir = PREVIEW_DIR if preview else PUBLISHED_DIR
     state_path = get_novel_state_path(title, preview)
     md_path = get_novel_md_path(title, preview)
+    images_dir = get_novel_images_dir(title, preview)
+
+    # Validate all paths are within expected directory (defense in depth)
+    try:
+        validate_path_within_directory(state_path, base_dir)
+        validate_path_within_directory(md_path, base_dir)
+        validate_path_within_directory(images_dir, base_dir)
+    except ValueError as e:
+        logger.error(f"Path validation failed in delete_novel: {e}")
+        raise
 
     if state_path.exists():
         state_path.unlink()
     if md_path.exists():
         md_path.unlink()
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
 
 # UI Components
 def render_generate_tab():
@@ -367,10 +424,45 @@ def render_generate_tab():
                     temperature = st.slider(
                         "Temperature",
                         min_value=0.0,
-                        max_value=1.0,
-                        value=0.6,
+                        max_value=1.5,
+                        value=1.0,
                         step=0.1,
-                        help="Lower = more focused and consistent. Higher = more creative and varied."
+                        help="Lower = more focused. Higher = more creative. 1.0 recommended for K2.5."
+                    )
+
+                col_c, col_d = st.columns(2)
+                with col_c:
+                    top_p = st.slider(
+                        "Top P",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.95,
+                        step=0.05,
+                        help="Nucleus sampling. 0.95 recommended for K2.5."
+                    )
+                with col_d:
+                    # Image generation settings
+                    if is_image_generation_enabled():
+                        enable_images = st.checkbox(
+                            "Generate illustrations",
+                            value=True,
+                            help="Generate cover and chapter images using FLUX"
+                        )
+                    else:
+                        st.caption("Add OPENROUTER_API_KEY for illustrations")
+                        enable_images = False
+
+                # FLUX model selection (only if images enabled)
+                flux_model = None
+                if enable_images:
+                    flux_model = st.selectbox(
+                        "Image model",
+                        options=[
+                            "black-forest-labs/flux.2-klein-4b",
+                            "black-forest-labs/flux.2-max"
+                        ],
+                        format_func=lambda x: "FLUX.2 Klein (Fast)" if "klein" in x else "FLUX.2 Max (Quality)",
+                        help="Klein is faster and cheaper, Max produces higher quality"
                     )
 
                 if st.button("Start Generation", use_container_width=True):
@@ -383,7 +475,7 @@ def render_generate_tab():
                             st.error(f"A novel with title '{title}' already exists in preview. Please choose a different title or continue the existing one.")
                         else:
                             # Start generation (reset_generation_state() called internally)
-                            generate_novel(title, concept, max_chapters, temperature)
+                            generate_novel(title, concept, max_chapters, temperature, top_p, enable_images, flux_model)
                             st.rerun()
 
             else:  # Continue Existing
@@ -468,7 +560,7 @@ def _update_gen_state(**kwargs) -> None:
         st.session_state.update(kwargs)
 
 
-def _generation_worker(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict) -> None:
+def _generation_worker(title: str, concept: str, max_chapters: int, temperature: float, top_p: float, images_enabled: bool, flux_model: str, is_new: bool, state: Dict) -> None:
     """
     Background worker for novel generation.
     Updates session state with progress; does NOT call Streamlit UI methods.
@@ -479,6 +571,17 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
+        # Set up images directory if enabled (with error handling)
+        images_dir = None
+        if images_enabled:
+            images_dir = get_novel_images_dir(title, preview=True)
+            try:
+                images_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                logger.warning(f"Failed to create images directory {images_dir}: {e}")
+                images_dir = None
+                images_enabled = False
+
         # Phase 1: Generate outline (for new novels OR novels paused during outline generation)
         if is_new or not state.get("outline_items"):
             _update_gen_state(gen_message="Generating outline...")
@@ -486,7 +589,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                 {"role": "system", "content": SYSTEM_PRIMER},
                 {"role": "user", "content": f"{OUTLINE_PROMPT}\n\nConcept: {concept}"}
             ]
-            stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
+            stream = chat_complete_stream(client, model, messages, temperature, max_tokens, top_p)
 
             outline_chunks = []
             chunk_count = 0
@@ -538,6 +641,25 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
 
             _update_gen_state(gen_message=f"Outline created with {len(state['outline_items'])} chapters")
 
+        # Generate cover image (if enabled and not already generated)
+        if images_enabled and not state.get("cover_image_path"):
+            _update_gen_state(gen_message="Generating cover image...")
+            try:
+                cover_prompt = generate_cover_prompt(state["title"], concept)
+                image_bytes, ext = generate_image(cover_prompt, flux_model)
+                cover_path = images_dir / f"cover.{ext}"
+                save_image(image_bytes, cover_path)
+                state["cover_image_path"] = str(cover_path)
+                save_novel_state(title, state, preview=True)
+                logger.info(f"Cover image saved to {cover_path}")
+            except Exception as e:
+                logger.warning(f"Failed to generate cover image: {e}")
+                # Track failure in state for debugging
+                if "failed_images" not in state:
+                    state["failed_images"] = []
+                state["failed_images"].append({"type": "cover", "error": str(e)})
+                save_novel_state(title, state, preview=True)
+
         # Phase 2: Generate chapters
         total_chapters = len(state["outline_items"])
         _update_gen_state(gen_progress_total=total_chapters)
@@ -573,7 +695,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                 {"role": "user", "content": user_content}
             ]
 
-            stream = chat_complete_stream(client, model, messages, temperature, max_tokens)
+            stream = chat_complete_stream(client, model, messages, temperature, max_tokens, top_p)
 
             chapter_chunks = []
             for chunk in stream:
@@ -599,7 +721,30 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
             if not chapter_md.lstrip().startswith("##"):
                 chapter_md = f"## Chapter {idx+1}: {chapter_title}\n\n" + chapter_md
 
-            state["chapters"].append({"title": chapter_title, "content": chapter_md})
+            chapter_data = {"title": chapter_title, "content": chapter_md}
+
+            # Generate chapter image
+            if images_enabled and images_dir:
+                _update_gen_state(gen_message=f"Generating image for Chapter {idx + 1}...")
+                try:
+                    chapter_prompt = generate_chapter_prompt(
+                        state["title"],
+                        chapter_title,
+                        chapter_md[:600]  # Use beginning of chapter as context
+                    )
+                    image_bytes, ext = generate_image(chapter_prompt, flux_model)
+                    chapter_image_path = images_dir / f"chapter_{idx+1:02d}.{ext}"
+                    save_image(image_bytes, chapter_image_path)
+                    chapter_data["image_path"] = str(chapter_image_path)
+                    logger.info(f"Chapter {idx+1} image saved")
+                except Exception as e:
+                    logger.warning(f"Failed to generate chapter {idx+1} image: {e}")
+                    # Track failure in state for debugging
+                    if "failed_images" not in state:
+                        state["failed_images"] = []
+                    state["failed_images"].append({"type": f"chapter_{idx+1}", "error": str(e)})
+
+            state["chapters"].append(chapter_data)
             state["current_idx"] = idx + 1
 
             # Save state and markdown
@@ -639,7 +784,7 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         _update_gen_state(gen_status="error", gen_message=user_msg)
 
 
-def start_generation_thread(title: str, concept: str, max_chapters: int, temperature: float, is_new: bool, state: Dict) -> None:
+def start_generation_thread(title: str, concept: str, max_chapters: int, temperature: float, top_p: float, images_enabled: bool, flux_model: str, is_new: bool, state: Dict) -> None:
     """Start the generation worker in a background thread with Streamlit context."""
     # Reset all progress state before starting
     reset_generation_state()
@@ -656,7 +801,7 @@ def start_generation_thread(title: str, concept: str, max_chapters: int, tempera
     ctx = get_script_run_ctx()
     thread = threading.Thread(
         target=_generation_worker,
-        args=(title, concept, max_chapters, temperature, is_new, state_copy),
+        args=(title, concept, max_chapters, temperature, top_p, images_enabled, flux_model, is_new, state_copy),
         daemon=True
     )
     add_script_run_ctx(thread, ctx)
@@ -672,11 +817,13 @@ def start_generation_thread(title: str, concept: str, max_chapters: int, tempera
         st.session_state.gen_thread = None
 
 
-def generate_novel(title: str, concept: str, max_chapters: int, temperature: float) -> None:
+def generate_novel(title: str, concept: str, max_chapters: int, temperature: float, top_p: float = 0.95, images_enabled: bool = False, flux_model: str = None) -> None:
     """Generate a new novel from scratch (starts background thread)."""
-    state = init_novel_state(title, concept, max_chapters)
+    state = init_novel_state(title, concept, max_chapters, flux_model=flux_model)
     state["temperature"] = temperature
-    start_generation_thread(title, concept, max_chapters, temperature, is_new=True, state=state)
+    state["top_p"] = top_p
+    state["images_enabled"] = images_enabled
+    start_generation_thread(title, concept, max_chapters, temperature, top_p, images_enabled, flux_model, is_new=True, state=state)
 
 def continue_novel(novel: Dict) -> None:
     """Continue generating an incomplete novel (starts background thread)."""
@@ -684,6 +831,10 @@ def continue_novel(novel: Dict) -> None:
     title = state["title"]
     concept = state["concept"]
     temperature = state["temperature"]
+    top_p = state.get("top_p", 0.95)
+    images_enabled = state.get("images_enabled", False)
+    # Load flux_model from state if available, fallback to env default
+    flux_model = state.get("flux_model") or (get_flux_model() if images_enabled else None)
 
     # Use existing outline length, or stored max_chapters if outline was never generated
     # (e.g., paused during outline generation). Fall back to 30 for legacy state files.
@@ -695,7 +846,7 @@ def continue_novel(novel: Dict) -> None:
         st.session_state.gen_message = "This novel is already complete!"
         return
 
-    start_generation_thread(title, concept, max_chapters, temperature, is_new=False, state=state)
+    start_generation_thread(title, concept, max_chapters, temperature, top_p, images_enabled, flux_model, is_new=False, state=state)
 
 def render_library_tab():
     """Render the library management tab."""
@@ -831,6 +982,13 @@ def render_reader():
     state = novel['state']
     chapters = state.get('chapters', [])
 
+    # Display cover image if available (with path validation)
+    cover_path = state.get("cover_image_path")
+    if cover_path and validate_image_path(cover_path, PREVIEW_DIR):
+        cover_file = Path(cover_path)
+        if cover_file.exists():
+            st.image(str(cover_file), caption="Cover", use_container_width=True)
+
     if not chapters:
         st.warning("No chapters available.")
         return
@@ -863,6 +1021,14 @@ def render_reader():
     # Display selected chapter
     selected_chapter = st.session_state.selected_chapter
     chapter = chapters[selected_chapter]
+
+    # Display chapter image if available (with path validation)
+    chapter_image_path = chapter.get("image_path")
+    if chapter_image_path and validate_image_path(chapter_image_path, PREVIEW_DIR):
+        chapter_image_file = Path(chapter_image_path)
+        if chapter_image_file.exists():
+            st.image(str(chapter_image_file), caption=f"Chapter {selected_chapter + 1}", use_container_width=True)
+
     st.markdown(chapter['content'])
 
     # Navigation buttons
@@ -979,7 +1145,9 @@ def main():
 
         st.markdown("---")
         st.markdown("### About")
-        st.markdown("Powered by Moonshot AI's Kimi K2 models")
+        st.markdown("Powered by Moonshot AI's Kimi K2.5 models")
+        if is_image_generation_enabled():
+            st.markdown("Images: FLUX via OpenRouter")
         st.markdown("[Documentation](https://github.com/intertwine/kimi-book-writer)")
 
     # Main content
