@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import List, Dict
@@ -27,7 +26,12 @@ from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn,
 
 from openai import OpenAI
 
-from utils import extract_outline_items
+from utils import (
+    extract_outline_items,
+    get_novel_slug,
+    CONCEPT_EXCERPT_MAX_CHARS,
+    CHAPTER_EXCERPT_MAX_CHARS,
+)
 from image_gen import (
     is_image_generation_enabled,
     generate_image,
@@ -37,14 +41,6 @@ from image_gen import (
 )
 
 console = Console()
-
-
-def get_novel_slug(title: str) -> str:
-    """Convert novel title to filesystem-safe slug."""
-    slug = re.sub(r'[^\w\s-]', '', title.lower())
-    slug = re.sub(r'[-\s]+', '-', slug)
-    return slug.strip('-')
-
 
 SYSTEM_PRIMER = """You are Kimi, an AI novelist provided by Moonshot AI. 
 You write long-form, novel-length fiction in clear, publishable English (or the user's requested language).
@@ -100,7 +96,7 @@ def env(name: str, default: str) -> str:
     val = os.getenv(name)
     return val if val is not None else default
 
-def create_fresh_state(title: str = None, concept: str = None) -> Dict:
+def create_fresh_state(title: str = None, concept: str = None, flux_model: str = None) -> Dict:
     """Create a new, empty novel state with default values."""
     return {
         "title": title,
@@ -114,6 +110,7 @@ def create_fresh_state(title: str = None, concept: str = None) -> Dict:
         "outline_items": [],
         "current_idx": 0,
         "images_enabled": False,
+        "flux_model": flux_model,  # Persist for resume consistency
         "cover_image_path": None
     }
 
@@ -235,14 +232,25 @@ def main():
         images_enabled = True
 
     state["images_enabled"] = images_enabled
+    # Use flux_model from args, state, or default
+    if not flux_model:
+        flux_model = state.get("flux_model") or get_flux_model()
+    state["flux_model"] = flux_model
 
     if images_enabled:
         # Set up images directory using novel slug (consistent with web UI)
         out_path = Path(args.out)
         slug = get_novel_slug(state["title"] or "novel")
         images_dir = out_path.parent / f"{slug}_images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        console.print(f"[cyan]Image generation enabled. Images will be saved to {images_dir}[/cyan]")
+        try:
+            images_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            console.print(f"[yellow]Warning: Failed to create images directory: {e}. Disabling images.[/yellow]")
+            images_dir = None
+            images_enabled = False
+            state["images_enabled"] = False
+        else:
+            console.print(f"[cyan]Image generation enabled. Images will be saved to {images_dir}[/cyan]")
 
     # Outline phase
     if not state["outline_text"]:
@@ -278,6 +286,11 @@ def main():
             console.print(f"[green]Cover image saved to {cover_path}[/green]")
         except Exception as e:
             console.print(f"[yellow]Failed to generate cover image: {e}[/yellow]")
+            # Track failed image for debugging
+            if "failed_images" not in state:
+                state["failed_images"] = []
+            state["failed_images"].append({"type": "cover", "error": str(e)})
+            save_state(state_path, state)
 
     # Chapter phase
     console.rule("[bold]Writing chapters[/bold]")
@@ -331,6 +344,14 @@ def main():
                     console.print(f"[green]Chapter {idx+1} image saved[/green]")
                 except Exception as e:
                     console.print(f"[yellow]Failed to generate chapter {idx+1} image: {e}[/yellow]")
+                    # Track failed image for debugging
+                    if "failed_images" not in state:
+                        state["failed_images"] = []
+                    state["failed_images"].append({
+                        "type": "chapter",
+                        "chapter_idx": idx + 1,
+                        "error": str(e)
+                    })
 
             state["chapters"].append(chapter_data)
             state["current_idx"] = idx + 1

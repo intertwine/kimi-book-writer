@@ -33,7 +33,14 @@ from kimi_writer import (  # noqa: E402
     CHAPTER_PROMPT,
     env
 )
-from utils import extract_outline_items  # noqa: E402
+from utils import (  # noqa: E402
+    extract_outline_items,
+    get_novel_slug,
+    validate_image_path,
+    validate_flux_model,
+    CONCEPT_EXCERPT_MAX_CHARS,
+    CHAPTER_EXCERPT_MAX_CHARS,
+)
 from image_gen import (  # noqa: E402
     is_image_generation_enabled,
     generate_image,
@@ -166,13 +173,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Utility functions
-def get_novel_slug(title: str) -> str:
-    """Convert novel title to filesystem-safe slug."""
-    slug = re.sub(r'[^\w\s-]', '', title.lower())
-    slug = re.sub(r'[-\s]+', '-', slug)
-    return slug.strip('-')
-
-
 def validate_path_within_directory(path: Path, allowed_dir: Path) -> Path:
     """
     Validate that a path resolves within an allowed directory.
@@ -571,11 +571,16 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
         model = state["model"]
         max_tokens = state["max_output_tokens"]
 
-        # Set up images directory if enabled
+        # Set up images directory if enabled (with race condition handling)
         images_dir = None
         if images_enabled:
             images_dir = get_novel_images_dir(title, preview=True)
-            images_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                images_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                logger.warning(f"Failed to create images directory {images_dir}: {e}")
+                images_dir = None
+                images_enabled = False
 
         # Phase 1: Generate outline (for new novels OR novels paused during outline generation)
         if is_new or not state.get("outline_items"):
@@ -649,6 +654,11 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                 logger.info(f"Cover image saved to {cover_path}")
             except Exception as e:
                 logger.warning(f"Failed to generate cover image: {e}")
+                # Track failure in state for debugging
+                if "failed_images" not in state:
+                    state["failed_images"] = []
+                state["failed_images"].append({"type": "cover", "error": str(e)})
+                save_novel_state(title, state, preview=True)
 
         # Phase 2: Generate chapters
         total_chapters = len(state["outline_items"])
@@ -729,6 +739,10 @@ def _generation_worker(title: str, concept: str, max_chapters: int, temperature:
                     logger.info(f"Chapter {idx+1} image saved")
                 except Exception as e:
                     logger.warning(f"Failed to generate chapter {idx+1} image: {e}")
+                    # Track failure in state for debugging
+                    if "failed_images" not in state:
+                        state["failed_images"] = []
+                    state["failed_images"].append({"type": f"chapter_{idx+1}", "error": str(e)})
 
             state["chapters"].append(chapter_data)
             state["current_idx"] = idx + 1
@@ -968,9 +982,9 @@ def render_reader():
     state = novel['state']
     chapters = state.get('chapters', [])
 
-    # Display cover image if available
+    # Display cover image if available (with path validation)
     cover_path = state.get("cover_image_path")
-    if cover_path:
+    if cover_path and validate_image_path(cover_path, PREVIEW_DIR):
         cover_file = Path(cover_path)
         if cover_file.exists():
             st.image(str(cover_file), caption="Cover", use_container_width=True)
@@ -1008,9 +1022,9 @@ def render_reader():
     selected_chapter = st.session_state.selected_chapter
     chapter = chapters[selected_chapter]
 
-    # Display chapter image if available
+    # Display chapter image if available (with path validation)
     chapter_image_path = chapter.get("image_path")
-    if chapter_image_path:
+    if chapter_image_path and validate_image_path(chapter_image_path, PREVIEW_DIR):
         chapter_image_file = Path(chapter_image_path)
         if chapter_image_file.exists():
             st.image(str(chapter_image_file), caption=f"Chapter {selected_chapter + 1}", use_container_width=True)

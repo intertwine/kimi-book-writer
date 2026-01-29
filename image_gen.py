@@ -16,6 +16,8 @@ import httpx
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from utils import CONCEPT_EXCERPT_MAX_CHARS, CHAPTER_EXCERPT_MAX_CHARS
+
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -25,6 +27,8 @@ load_dotenv()
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_FLUX_MODEL = "black-forest-labs/flux.2-klein-4b"
 ALLOWED_IMAGE_EXTENSIONS = {"png", "jpeg", "jpg", "webp", "gif"}
+# Timeout is configurable for slower models like FLUX.2-max (default 180s)
+DEFAULT_IMAGE_TIMEOUT = int(os.getenv("IMAGE_GENERATION_TIMEOUT", "180"))
 
 
 def is_image_generation_enabled() -> bool:
@@ -75,7 +79,7 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
         "modalities": ["image"]
     }
 
-    with httpx.Client(timeout=120.0) as client:
+    with httpx.Client(timeout=float(DEFAULT_IMAGE_TIMEOUT)) as client:
         response = client.post(
             f"{OPENROUTER_BASE_URL}/chat/completions",
             headers=headers,
@@ -177,7 +181,7 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
 def generate_cover_prompt(title: str, concept: str) -> str:
     """Generate a prompt for the novel's cover image."""
     # Truncate concept if too long
-    concept_excerpt = concept[:800] if len(concept) > 800 else concept
+    concept_excerpt = concept[:CONCEPT_EXCERPT_MAX_CHARS] if len(concept) > CONCEPT_EXCERPT_MAX_CHARS else concept
 
     return f"""Create a book cover illustration for a novel.
 
@@ -196,7 +200,7 @@ Requirements:
 def generate_chapter_prompt(novel_title: str, chapter_title: str, chapter_excerpt: str) -> str:
     """Generate a prompt for a chapter illustration."""
     # Truncate excerpt if too long
-    excerpt = chapter_excerpt[:600] if len(chapter_excerpt) > 600 else chapter_excerpt
+    excerpt = chapter_excerpt[:CHAPTER_EXCERPT_MAX_CHARS] if len(chapter_excerpt) > CHAPTER_EXCERPT_MAX_CHARS else chapter_excerpt
 
     return f"""Create an illustration for a chapter of a novel.
 

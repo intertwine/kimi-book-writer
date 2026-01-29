@@ -1,5 +1,68 @@
 from __future__ import annotations
+import os
 import re
+from pathlib import Path
+
+# Constants for prompt truncation limits
+CONCEPT_EXCERPT_MAX_CHARS = 800
+CHAPTER_EXCERPT_MAX_CHARS = 600
+
+# Valid FLUX model identifiers
+VALID_FLUX_MODELS = {
+    "black-forest-labs/flux.2-klein-4b",
+    "black-forest-labs/flux.2-max",
+    "black-forest-labs/flux.2-pro",
+    "black-forest-labs/flux.2-flex",
+}
+
+
+def get_novel_slug(title: str) -> str:
+    """Convert novel title to filesystem-safe slug."""
+    slug = re.sub(r'[^\w\s-]', '', title.lower())
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return slug.strip('-')
+
+
+def validate_image_path(path_str: str, allowed_dir: Path) -> bool:
+    """
+    Validate that an image path is safe to use.
+    Returns True if path is valid and within allowed directory.
+    """
+    if not path_str:
+        return False
+    try:
+        path = Path(path_str)
+        resolved = path.resolve()
+        allowed_resolved = allowed_dir.resolve()
+        # Check path is within allowed directory
+        if not str(resolved).startswith(str(allowed_resolved) + os.sep):
+            return False
+        # Check extension is valid image type
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+        if path.suffix.lower() not in valid_extensions:
+            return False
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def validate_flux_model(model: str) -> str:
+    """
+    Validate and normalize a FLUX model identifier.
+    Returns the model if valid, raises ValueError if invalid.
+    """
+    if not model:
+        return None
+    if model in VALID_FLUX_MODELS:
+        return model
+    # Check if it's a partial match (user might omit prefix)
+    for valid_model in VALID_FLUX_MODELS:
+        if valid_model.endswith(model):
+            return valid_model
+    raise ValueError(
+        f"Invalid FLUX model '{model}'. Valid models: {', '.join(sorted(VALID_FLUX_MODELS))}"
+    )
+
 
 def extract_outline_items(text: str):
     """
