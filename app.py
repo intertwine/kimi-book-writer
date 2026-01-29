@@ -423,7 +423,7 @@ def render_generate_tab():
                         enable_images = st.checkbox(
                             "Generate illustrations",
                             value=True,
-                            help="Generate cover and chapter images using FLUX.2"
+                            help="Generate cover and chapter images using FLUX"
                         )
                     else:
                         st.caption("Add OPENROUTER_API_KEY for illustrations")
@@ -435,11 +435,11 @@ def render_generate_tab():
                     flux_model = st.selectbox(
                         "Image model",
                         options=[
-                            "black-forest-labs/flux.2-klein-4b",
-                            "black-forest-labs/flux.2-max"
+                            "black-forest-labs/flux-1.1-pro",
+                            "black-forest-labs/flux-1-schnell"
                         ],
-                        format_func=lambda x: "FLUX.2 Klein (Fast)" if "klein" in x else "FLUX.2 Max (Quality)",
-                        help="Klein is faster and cheaper, Max produces higher quality"
+                        format_func=lambda x: "FLUX 1.1 Pro (Quality)" if "pro" in x else "FLUX Schnell (Fast)",
+                        help="Pro produces higher quality, Schnell is faster and cheaper"
                     )
 
                 if st.button("Start Generation", use_container_width=True):
@@ -1110,7 +1110,7 @@ def main():
         st.markdown("### About")
         st.markdown("Powered by Moonshot AI's Kimi K2.5 models")
         if is_image_generation_enabled():
-            st.markdown("Images: FLUX.2 via OpenRouter")
+            st.markdown("Images: FLUX via OpenRouter")
         st.markdown("[Documentation](https://github.com/intertwine/kimi-book-writer)")
 
     # Main content

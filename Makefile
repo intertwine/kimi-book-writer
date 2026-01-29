@@ -75,8 +75,8 @@ novel:
 	echo ""; \
 	read -p "Max chapters [30]: " chapters; \
 	chapters=$${chapters:-30}; \
-	read -p "Output file [novel.md]: " output; \
-	output=$${output:-novel.md}; \
+	read -p "Output file [preview/novel.md]: " output; \
+	output=$${output:-preview/novel.md}; \
 	echo ""; \
 	printf "$(CYAN)Starting generation...$(RESET)\n"; \
 	printf "  Title: $$title\n"; \
@@ -110,17 +110,17 @@ novel-images:
 	echo ""; \
 	read -p "Max chapters [30]: " chapters; \
 	chapters=$${chapters:-30}; \
-	read -p "Output file [novel.md]: " output; \
-	output=$${output:-novel.md}; \
+	read -p "Output file [preview/novel.md]: " output; \
+	output=$${output:-preview/novel.md}; \
 	echo ""; \
 	printf "Image model options:\n"; \
-	printf "  1. flux.2-klein-4b (fast, cheaper) [default]\n"; \
-	printf "  2. flux.2-max (highest quality)\n"; \
+	printf "  1. flux-1.1-pro (recommended) [default]\n"; \
+	printf "  2. flux-1-schnell (fast, cheaper)\n"; \
 	read -p "Select model [1]: " model_choice; \
 	if [ "$$model_choice" = "2" ]; then \
-		flux_model="black-forest-labs/flux.2-max"; \
+		flux_model="black-forest-labs/flux-1-schnell"; \
 	else \
-		flux_model="black-forest-labs/flux.2-klein-4b"; \
+		flux_model="black-forest-labs/flux-1.1-pro"; \
 	fi; \
 	echo ""; \
 	printf "$(CYAN)Starting generation with images...$(RESET)\n"; \

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple
 
+import httpx
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -22,7 +23,7 @@ load_dotenv()
 
 # Constants
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_FLUX_MODEL = "black-forest-labs/flux.2-klein-4b"
+DEFAULT_FLUX_MODEL = "black-forest-labs/flux-1.1-pro"
 
 
 def is_image_generation_enabled() -> bool:
@@ -56,7 +57,7 @@ def get_openrouter_client():
 @retry(wait=wait_exponential(multiplier=2, min=2, max=60), stop=stop_after_attempt(3))
 def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str]:
     """
-    Generate an image using FLUX.2 via OpenRouter.
+    Generate an image using FLUX via OpenRouter.
 
     Args:
         prompt: Text description of the image to generate
@@ -69,36 +70,61 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
         ValueError: If OpenRouter API key not configured
         RuntimeError: If image generation fails
     """
-    client = get_openrouter_client()
-    model = model or get_flux_model()
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY not configured")
 
+    model = model or get_flux_model()
     logger.info(f"Generating image with model {model}")
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        extra_body={"modalities": ["image", "text"]}
-    )
+    # Use httpx directly to have full control over the request format
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/intertwine/kimi-book-writer",
+        "X-Title": "Kimi Book Writer"
+    }
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "modalities": ["image", "text"]
+    }
+
+    with httpx.Client(timeout=120.0) as client:
+        response = client.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload
+        )
+
+        if response.status_code != 200:
+            error_text = response.text[:500] if response.text else "No error message"
+            raise RuntimeError(f"OpenRouter API error {response.status_code}: {error_text}")
+
+        data = response.json()
 
     # Extract image from response
-    content = response.choices[0].message.content
+    choices = data.get("choices", [])
+    if not choices:
+        raise RuntimeError("No choices in response")
+
+    message = choices[0].get("message", {})
+    content = message.get("content")
 
     # Handle different response formats
-    if hasattr(response.choices[0].message, 'images') and response.choices[0].message.images:
-        # Response has images array
-        images = response.choices[0].message.images
-        if images:
-            image_data = images[0]
-            if isinstance(image_data, dict) and 'image_url' in image_data:
-                data_url = image_data['image_url'].get('url', '')
-            elif isinstance(image_data, str):
-                data_url = image_data
-            else:
-                raise RuntimeError(f"Unexpected image format: {type(image_data)}")
+    # Format 1: images array in message
+    if "images" in message and message["images"]:
+        images = message["images"]
+        image_data = images[0]
+        if isinstance(image_data, dict) and "image_url" in image_data:
+            data_url = image_data["image_url"].get("url", "")
+        elif isinstance(image_data, str):
+            data_url = image_data
         else:
-            raise RuntimeError("No images in response")
+            raise RuntimeError(f"Unexpected image format: {type(image_data)}")
+    # Format 2: content is array of parts
     elif isinstance(content, list):
-        # Content is array of parts
         data_url = None
         for part in content:
             if isinstance(part, dict):
@@ -106,18 +132,17 @@ def generate_image(prompt: str, model: Optional[str] = None) -> Tuple[bytes, str
                     data_url = part.get("image_url", {}).get("url", "")
                     break
                 elif part.get("type") == "image":
-                    # Some APIs return type: "image" with base64 data
                     b64_data = part.get("data", part.get("image", ""))
                     mime_type = part.get("mime_type", "image/png")
                     ext = mime_type.split("/")[1] if "/" in mime_type else "png"
                     return base64.b64decode(b64_data), ext
         if not data_url:
-            raise RuntimeError(f"No image found in response content: {content[:200] if content else 'empty'}")
+            raise RuntimeError(f"No image found in response content: {str(content)[:200]}")
+    # Format 3: content is a data URL string
     elif isinstance(content, str) and content.startswith("data:image"):
-        # Content is a data URL
         data_url = content
     else:
-        raise RuntimeError(f"Unexpected response format: {type(content)}")
+        raise RuntimeError(f"Unexpected response format. Content type: {type(content)}, keys: {list(message.keys())}")
 
     # Parse data URL: "data:image/png;base64,iVBORw0KGgo..."
     if not data_url or not data_url.startswith("data:image"):

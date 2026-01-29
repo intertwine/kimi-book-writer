@@ -10,6 +10,7 @@ dependencies = [
   "rich>=13.7.1",
   "tenacity>=9.0.0",
   "streamlit>=1.37.0",  # Required for @st.fragment(run_every=...)
+  "httpx>=0.27.0",  # For OpenRouter image generation API
 ]
 
 [dependency-groups]

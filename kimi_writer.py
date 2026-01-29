@@ -45,9 +45,18 @@ Avoid explicit sexual content, racism, terrorism, or graphic violence.
 The string 'Moonshot AI' must remain in English if mentioned.
 """
 
-OUTLINE_PROMPT = """You will design a compelling, novel-length outline based on the user's concept.
+def get_outline_prompt(max_chapters: int = None) -> str:
+    """Generate the outline prompt, optionally limiting chapter count."""
+    if max_chapters and max_chapters < 20:
+        chapter_range = f"exactly {max_chapters} chapters"
+    elif max_chapters:
+        chapter_range = f"{min(20, max_chapters)}–{max_chapters} chapters"
+    else:
+        chapter_range = "20–40 chapters (or reasonable for the genre)"
 
-Return a detailed outline with 20–40 chapters (or reasonable for the genre), each a single line:
+    return f"""You will design a compelling, novel-length outline based on the user's concept.
+
+Return a detailed outline with {chapter_range}, each a single line:
 - A short, punchy chapter title
 - A 1–2 sentence summary of the chapter's events or purpose
 Return the outline as a numbered Markdown list (e.g., "1. Chapter Title — one sentence...").
@@ -167,7 +176,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate a novel-length Markdown book with Kimi K2.5.")
     parser.add_argument("--prompt", "-p", help="Concept prompt for the novel (if omitted, you will be asked)")
     parser.add_argument("--title", "-t", help="Optional working title")
-    parser.add_argument("--out", "-o", default="novel.md", help="Output Markdown path")
+    parser.add_argument("--out", "-o", default="preview/novel.md", help="Output Markdown path")
     parser.add_argument("--resume", action="store_true", help="Resume from saved state if available")
     parser.add_argument("--chapters", type=int, default=None, help="Limit number of chapters to write (for testing)")
     parser.add_argument("--images", action="store_true", help="Generate cover and chapter images (requires OPENROUTER_API_KEY)")
@@ -224,9 +233,10 @@ def main():
     # Outline phase
     if not state["outline_text"]:
         console.rule("[bold]Generating outline[/bold]")
+        outline_prompt = get_outline_prompt(args.chapters)
         messages = [
             {"role": "system", "content": SYSTEM_PRIMER},
-            {"role": "user", "content": f"{OUTLINE_PROMPT}\n\nConcept: {state['concept']}"}]
+            {"role": "user", "content": f"{outline_prompt}\n\nConcept: {state['concept']}"}]
         stream = chat_complete_stream(client, model, messages, temperature, max_tokens, top_p)
         outline = stream_to_text(stream).strip()
         state["outline_text"] = outline
@@ -314,6 +324,7 @@ def main():
             progress.advance(task)
 
     out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(build_book_markdown(state), encoding="utf-8")
     console.rule("[bold green]Done[/bold green]")
     console.print(f"Wrote [bold]{out_path}[/bold] with {len(state['chapters'])} chapters.")
