@@ -26,10 +26,10 @@
 
 **Direct commands:**
 - `uv sync` installs dependencies (preferred); `pip install -e .` is the fallback.
-- `streamlit run app.py` runs the web UI; `bash run-ui.sh` bootstraps `.env` and uses `uv` if available.
-- `python kimi_writer.py` runs the interactive CLI.
-- `python kimi_writer.py --prompt "..." --title "..." --out book.md --images` runs with images.
-- `pytest` runs the test suite; `uv run pytest` if you are using uv.
+- `uv run streamlit run app.py` runs the web UI; `bash run-ui.sh` bootstraps `.env` and uses `uv` if available.
+- `uv run python kimi_writer.py` runs the interactive CLI.
+- `uv run python kimi_writer.py --prompt "..." --title "..." --out book.md --images` runs with images.
+- `uv run pytest` runs the test suite.
 
 ## Coding Style & Naming Conventions
 

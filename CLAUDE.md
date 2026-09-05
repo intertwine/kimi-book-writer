@@ -14,17 +14,17 @@ uv sync                          # preferred
 pip install -e .                 # fallback
 
 # Run the web UI
-streamlit run app.py
+uv run streamlit run app.py
 bash run-ui.sh                   # bootstraps .env, uses uv if available
 
 # Run the CLI
-python kimi_writer.py                                           # interactive
-python kimi_writer.py --prompt "..." --title "..." --out book.md  # non-interactive
-python kimi_writer.py --resume                                  # continue from novel_state.json
-python kimi_writer.py --chapters N                              # limit chapters
-python kimi_writer.py --images                                  # enable image generation
-python kimi_writer.py --no-images                               # disable image generation
-python kimi_writer.py --flux-model black-forest-labs/flux.2-max # use specific FLUX model
+uv run python kimi_writer.py                                           # interactive
+uv run python kimi_writer.py --prompt "..." --title "..." --out book.md  # non-interactive
+uv run python kimi_writer.py --resume                                  # continue from novel_state.json
+uv run python kimi_writer.py --chapters N                              # limit chapters
+uv run python kimi_writer.py --images                                  # enable image generation
+uv run python kimi_writer.py --no-images                               # disable image generation
+uv run python kimi_writer.py --flux-model black-forest-labs/flux.2-max # use specific FLUX model
 
 # Testing
 uv run pytest                    # run all tests
