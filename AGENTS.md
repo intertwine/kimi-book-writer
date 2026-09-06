@@ -4,10 +4,12 @@
 
 - `app.py` hosts the Streamlit web UI.
 - `kimi_writer.py` implements the CLI and core generation flow.
+- Chapter prompts carry rolling context (last 3 chapters, 2000 chars each); changing that changes continuity behavior.
 - `utils.py` provides shared helpers used by both entry points (outline parsing, path validation).
 - `image_gen.py` provides FLUX.2 image generation via OpenRouter API.
 - `async_image_gen.py` provides `ImageGenerationQueue` for concurrent image generation.
 - `preview/` holds draft novels (gitignored); `published/` holds finalized novels (committed).
+- Publishing from the web UI auto-commits to `published/`; do not run it just to test.
 - `examples/` contains sample outputs; `tests/` contains pytest tests.
 - `.env.example` is the config template; `pyproject.toml` defines dependencies.
 - `Makefile` provides convenient targets for common operations.
@@ -54,4 +56,5 @@
 
 - Copy `.env.example` to `.env` and set `MOONSHOT_API_KEY` (required for text generation).
 - Optionally set `OPENROUTER_API_KEY` to enable FLUX.2 image generation.
+- `KIMI_TEMPERATURE=1.0` is the recommended setting for K2.5 thinking mode.
 - Do not commit `.env` or API keys; drafts belong in `preview/`, finalized novels in `published/`.
